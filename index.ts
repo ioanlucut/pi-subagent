@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,16 +7,18 @@ import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendi
 import {
 	effectiveRunState,
 	inboxDir,
-	launchRun,
+	processStartTime,
 	listRuns,
 	readMetadata,
 	removeRunDir,
+	resumeSuspendedRuns,
 	runDisplayName,
+	suspendOrphanedRuns,
+	suspendRuns,
 	type InboxMessage,
 	type RunMetadata,
 	tmuxSessionExists,
 	updateMetadata,
-	waitForRunShutdown,
 } from "./shared.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
@@ -146,23 +148,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			);
 		};
 
-		pi.on("session_start", (_event, ctx) => {
+		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
+		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
+		process.env.PI_SUBAGENT_PARENT_STARTED = processStartTime(process.pid) ?? "";
+
+		pi.on("session_start", async (_event, ctx) => {
+			// Suspend children of parents that died without shutdown, so they relaunch when their session resumes.
+			await suspendOrphanedRuns();
 			// Relaunch children that were suspended when this session was last quit or switched away from.
-			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
-				if (!existsSync(run.sessionFile)) {
-					removeRunDir(run.runDir);
-					continue;
-				}
-				const starting = updateMetadata(run.runDir, { state: "starting", error: undefined }) ?? run;
-				try {
-					launchRun(starting);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					updateMetadata(run.runDir, { state: "error", error: message });
-					if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
-				}
-			}
+			resumeSuspendedRuns(ctx.sessionManager.getSessionId(), (run, message) => {
+				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
+			});
 
 			if (!ctx.hasUI) return;
 			widgetContext = ctx;
@@ -179,15 +175,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			if (event.reason === "reload") return;
 			// Suspend running children: stop the process but keep transcript and metadata so resuming this
 			// session relaunches them. Children that already exited on their own are discarded.
+			const running: RunMetadata[] = [];
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				if (!tmuxSessionExists(run.tmuxSession)) {
-					if (!run.suspended) removeRunDir(run.runDir);
-					continue;
-				}
-				updateMetadata(run.runDir, { suspended: true });
-				spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
-				await waitForRunShutdown(run.runDir);
+				if (tmuxSessionExists(run.tmuxSession)) running.push(run);
+				else if (!run.suspended) removeRunDir(run.runDir);
 			}
+			await suspendRuns(running);
 		});
 		return;
 	}

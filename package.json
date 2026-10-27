@@ -4,6 +4,9 @@
   "private": true,
   "keywords": ["pi-package"],
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "bin": {
     "subagent": "./subagent.ts"
   },

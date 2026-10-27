@@ -12,6 +12,9 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const launcherPath = join(dirname(fileURLToPath(import.meta.url)), "launcher.ts");
 
 export type RunState = "starting" | "busy" | "idle" | "exited" | "error";
 
@@ -21,6 +24,10 @@ export interface RunMetadata {
 	name?: string;
 	parentSessionId?: string;
 	parentSessionFile?: string;
+	/** Process ID of the parent pi, so a later parent can find children whose parent died. */
+	parentPid?: number;
+	/** Start time of the parent pi (`ps -o lstart`), so a reused process ID does not count as the parent. */
+	parentStarted?: string;
 	childSessionId?: string;
 	tmuxSession: string;
 	runDir: string;
@@ -155,6 +162,20 @@ export function tmuxSessionExists(session: string): boolean {
 	return spawnSync("tmux", ["has-session", "-t", session], { stdio: "ignore" }).status === 0;
 }
 
+/** Variables tmux sets for each pane. They describe the child's terminal, so they win over the caller's. */
+export const TMUX_PANE_VARIABLES = ["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE"];
+
+/**
+ * Save the caller's environment and the command for `launcher.ts`. tmux would otherwise give a new
+ * session the environment of the process that started the tmux server. The file sits in the
+ * private run dir and keeps values out of process arguments; the launcher deletes it on start.
+ */
+function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string[]): string {
+	const file = join(runDir, "launch.json");
+	writeFileSync(file, JSON.stringify({ env, command }), { encoding: "utf8", mode: 0o600 });
+	return file;
+}
+
 /** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
 export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
 	let launcher = "pi";
@@ -165,6 +186,23 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 	} catch {
 		// Use the installed pi executable.
 	}
+	const launchFile = writeLaunchFile(
+		metadata.runDir,
+		{ ...process.env, PWD: metadata.cwd, PI_SUBAGENT_RUN_DIR: metadata.runDir },
+		[
+			launcher,
+			"--session",
+			metadata.sessionFile,
+			"--provider",
+			metadata.provider,
+			"--model",
+			metadata.model,
+			"--thinking",
+			metadata.thinking,
+			...(metadata.launchArgs ?? []),
+			...initialArgs,
+		],
+	);
 
 	const result = spawnSync(
 		"tmux",
@@ -180,23 +218,21 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 			"-c",
 			metadata.cwd,
 			"--",
-			"env",
-			`PI_SUBAGENT_RUN_DIR=${metadata.runDir}`,
-			launcher,
-			"--session",
-			metadata.sessionFile,
-			"--provider",
-			metadata.provider,
-			"--model",
-			metadata.model,
-			"--thinking",
-			metadata.thinking,
-			...(metadata.launchArgs ?? []),
-			...initialArgs,
+			// Start the launcher with only tmux's pane variables: server values such as NODE_OPTIONS could break node.
+			"/bin/sh",
+			"-c",
+			`exec /usr/bin/env -i ${TMUX_PANE_VARIABLES.map((name) => `${name}="$${name}"`).join(" ")} "$@"`,
+			"launch",
+			process.execPath,
+			launcherPath,
+			launchFile,
 		],
 		{ encoding: "utf8" },
 	);
-	if (result.status !== 0) throw new Error(result.stderr.trim() || "Failed to create tmux session");
+	if (result.status !== 0) {
+		rmSync(launchFile, { force: true });
+		throw new Error(result.stderr.trim() || "Failed to create tmux session");
+	}
 }
 
 export function effectiveRunState(metadata: RunMetadata): RunState {
@@ -280,4 +316,72 @@ export function assistantText(message: AssistantMessage): string {
 		if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
 	}
 	return parts.join("\n").trim() || message.errorMessage || "(no response text)";
+}
+
+/** Stop running children but keep transcript and metadata, so resuming the parent session relaunches them. */
+export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
+	for (const run of runs) {
+		updateMetadata(run.runDir, { suspended: true });
+		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
+	}
+	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
+	await Promise.all(runs.map((run) => waitForRunShutdown(run.runDir)));
+}
+
+/** Suspend running children whose parent process died without its shutdown handler (crash, kill -9, lost terminal). */
+export async function suspendOrphanedRuns(): Promise<void> {
+	await suspendRuns(listRuns().filter((run) => parentIsGone(run) && tmuxSessionExists(run.tmuxSession)));
+}
+
+function parentIsGone(run: RunMetadata): boolean {
+	if (run.parentPid === undefined) return false;
+	if (!processExists(run.parentPid)) return true;
+	// Same process ID, other start time: the ID now belongs to another process. Unknown start time: keep the child.
+	const started = processStartTime(run.parentPid);
+	return started !== undefined && run.parentStarted !== undefined && started !== run.parentStarted;
+}
+
+function processExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		// EPERM: the process exists but belongs to another user.
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** Start time of a process, or undefined when it cannot be read. Together with the PID it names one process. */
+export function processStartTime(pid: number): string | undefined {
+	// Fixed locale and time zone, so every Pi gets the same text for the same process.
+	const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+		encoding: "utf8",
+		env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+	});
+	return result.status === 0 ? result.stdout.trim() || undefined : undefined;
+}
+
+/** Relaunch the session's children that were suspended. `onError` gets each run that could not start. */
+export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
+	for (const run of listRuns(sessionId)) {
+		if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
+		if (!existsSync(run.sessionFile)) {
+			removeRunDir(run.runDir);
+			continue;
+		}
+		const starting =
+			updateMetadata(run.runDir, {
+				state: "starting",
+				error: undefined,
+				parentPid: process.pid,
+				parentStarted: processStartTime(process.pid),
+			}) ?? run;
+		try {
+			launchRun(starting);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateMetadata(run.runDir, { state: "error", error: message });
+			onError(run, message);
+		}
+	}
 }
