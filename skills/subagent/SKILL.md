@@ -75,6 +75,10 @@ When children review the same change on separate axes (for example Standards and
 - Tell each child to run the repository's lint and the focused tests for the changed files, unless the user forbids checks. A finding from a failed command beats one from reading.
 - Tell each child to search the repository for any name it proposes (`rg -n '<newName>'`) and to report a clash, not the rename, when the name is already in use.
 
+## Watch in Herdr
+
+Inside Herdr, the extension opens a read-only pane beside the parent for each working child and closes it when the child is idle or stopped. Do not open, focus, or close these panes yourself, and do not run `herdr` commands for them.
+
 ## Communicate
 
 ```sh

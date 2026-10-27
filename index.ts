@@ -20,6 +20,7 @@ import {
 	tmuxSessionExists,
 	updateMetadata,
 } from "./shared.ts";
+import { HerdrPanes } from "./herdr-panes.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
 
@@ -122,12 +123,18 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	if (!runDir) {
 		let widgetTimer: ReturnType<typeof setInterval> | undefined;
 		let widgetContext: ExtensionContext | undefined;
+		// Inside Herdr, show each working child in a read-only pane beside this one; PI_SUBAGENT_HERDR_PANES=0 turns it off.
+		const panes =
+			process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID && process.env.PI_SUBAGENT_HERDR_PANES !== "0"
+				? new HerdrPanes(process.env.HERDR_PANE_ID)
+				: undefined;
 
 		const refreshWidget = (): void => {
 			if (!widgetContext) return;
 			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
 				.map((run) => ({ run, state: effectiveRunState(run) }))
 				.filter(({ state }) => state !== "exited");
+			panes?.sync(activeRuns);
 			if (activeRuns.length === 0) {
 				widgetContext.ui.setWidget("subagents", undefined);
 				return;
@@ -172,6 +179,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			widgetTimer = undefined;
 			widgetContext = undefined;
 			ctx.ui.setWidget("subagents", undefined);
+			panes?.closeAll();
 			if (event.reason === "reload") return;
 			// Suspend running children: stop the process but keep transcript and metadata so resuming this
 			// session relaunches them. Children that already exited on their own are discarded.
