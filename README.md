@@ -55,17 +55,17 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 
 ## Commands
 
-| Command                                                          | Effect                                                                                      |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child. Prints its handle and the tmux attach command.                               |
-| `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).            |
-| `subagent status <handle>`                                       | One child's state and model.                                                                |
-| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s.          |
-| `subagent send <handle> <message>`                               | Idle child: start a new turn. Busy child: steer the current turn.                           |
-| `subagent send <handle> --follow-up <message>`                   | Busy child: queue a turn after the current one.                                             |
-| `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                     |
-| `subagent stop <handle>`                                         | Remove the child for good.                                                                  |
-| `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`. |
+| Command                                                          | Effect                                                                                                                                                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child. Prints its handle and the tmux attach command.                                                                                                                   |
+| `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).                                                                                                |
+| `subagent status <handle>`                                       | One child's state and model.                                                                                                                                                    |
+| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. |
+| `subagent send <handle> <message>`                               | Idle child: start a new turn. Busy child: steer the current turn.                                                                                                               |
+| `subagent send <handle> --follow-up <message>`                   | Busy child: queue a turn after the current one.                                                                                                                                 |
+| `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
+| `subagent stop <handle>`                                         | Remove the child for good.                                                                                                                                                      |
+| `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 A status line below the Pi editor shows each child's name and state (`busy`, `idle`, `error`).
 

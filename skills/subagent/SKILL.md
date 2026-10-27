@@ -65,7 +65,15 @@ subagent wait <handle>
 
 Run `subagent list` at any time to rediscover active subagents and their handles, names, and current states if you no longer remember them.
 
-`wait` follows the durable session state and prints the latest final assistant response. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
+`wait` follows the durable session state and prints the latest final assistant response. The first line is `<handle> finished`, or `<handle> failed (error)` or `failed (aborted)` with exit code 1 when the turn ended in a provider error or an abort. A failed turn is no result: send the task again or report the gap, and never count it as a review that found nothing. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
+
+## Review with two or more children
+
+When children review the same change on separate axes (for example Standards and Spec):
+
+- Give each axis only its own questions. The Standards child reports no spec gaps; the Spec child reports no style smells. Findings both would make go to one named axis.
+- Tell each child to run the repository's lint and the focused tests for the changed files, unless the user forbids checks. A finding from a failed command beats one from reading.
+- Tell each child to search the repository for any name it proposes (`rg -n '<newName>'`) and to report a clash, not the rename, when the name is already in use.
 
 ## Communicate
 
