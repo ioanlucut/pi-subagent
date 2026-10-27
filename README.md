@@ -4,7 +4,7 @@ Observable, persistent [Pi](https://pi.dev) subagents for independent reviews, i
 
 Each subagent is a separate Pi process in its own tmux session, with its own JSONL transcript. The parent spawns it with a CLI, keeps working, and later waits for its answer, steers it, or attaches to its TUI. A child is a normal, full Pi, not a stripped-down tool call.
 
-This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) with two fixes. Upstream has issues and pull requests disabled, so they live here:
+This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at), with two fixes. Upstream has issues and pull requests disabled, so they live here:
 
 | Issue                                                   | Upstream behaviour                                                                                                                                           | Here                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
@@ -212,3 +212,7 @@ npm test
 ```
 
 Upstream has no license file.
+
+## Credits
+
+Pi Subagent is the work of [Mario Zechner](https://github.com/badlogic), who also created [Pi](https://pi.dev). The design is his: each subagent is a full Pi in its own tmux session, results come from the durable transcript and not the screen, and children are suspended and resumed with their parent session. This fork adds only the two fixes above, their tests, and this README. Thank you, Mario, for building Pi and this extension, and for sharing them.
