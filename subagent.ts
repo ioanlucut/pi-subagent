@@ -276,8 +276,10 @@ async function waitSubagent(args: string[]): Promise<void> {
 		if (metadata.hasStarted && state === "idle" && !pending) {
 			const message = readLatestAssistant(metadata.sessionFile);
 			if (!message) fail(`${handle} finished without an assistant response`);
-			process.stdout.write(`${handle} finished\n\n${assistantText(message)}\n`);
-			if (message.stopReason === "error" || message.stopReason === "aborted") process.exitCode = 1;
+			const failed = message.stopReason === "error" || message.stopReason === "aborted";
+			const outcome = failed ? `failed (${message.stopReason})` : "finished";
+			process.stdout.write(`${handle} ${outcome}\n\n${assistantText(message)}\n`);
+			if (failed) process.exitCode = 1;
 			return;
 		}
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));

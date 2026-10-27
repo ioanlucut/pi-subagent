@@ -298,3 +298,32 @@ test("a parent whose state ps cannot report is not treated as dead", async () =>
 
 	assert.equal(tmuxSessionExists(run.tmuxSession), true);
 });
+
+/** An idle child whose transcript ends with `message`, as `wait` finds it after the turn. */
+function idleRun(message: Record<string, unknown>): string {
+	startTmuxServer({ PATH: basePath });
+	const handle = "abc123";
+	const runDir = join(agentDir(), "subagents", handle);
+	mkdirSync(runDir, { recursive: true });
+	const sessionFile = join(runDir, "session.jsonl");
+	writeFileSync(sessionFile, `${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", ...message } })}\n`);
+	writeFileSync(
+		join(runDir, "metadata.json"),
+		JSON.stringify({ version: 1, handle, tmuxSession: "server", runDir, sessionFile, state: "idle", hasStarted: true }),
+	);
+	return handle;
+}
+
+test("wait reports a turn that ended in a provider error as failed, not finished", () => {
+	const handle = idleRun({ content: [], stopReason: "error", errorMessage: "OAuth refresh failed for anthropic" });
+	const result = runCli(["wait", handle], {});
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /^abc123 failed \(error\)\n\nOAuth refresh failed for anthropic\n$/);
+});
+
+test("wait reports a completed turn as finished", () => {
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	const result = runCli(["wait", handle], {});
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "abc123 finished\n\nAll good.\n");
+});
