@@ -69,6 +69,16 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 
 A status line below the Pi editor shows each child's name and state (`busy`, `idle`, `error`).
 
+### Watch children in Herdr
+
+When the parent Pi runs in [Herdr](https://github.com/herdrdev/herdr), each working child opens in a pane in the same tab, beside the parent pane. The first child pane goes on the right of the parent; more children stack below it. Each pane:
+
+- shows the child's live TUI, read-only (`tmux attach -r`), so keys cannot reach the child
+- is marked as disposable: the border label `◆ subagent <name>`, a violet `SUBAGENT <name> · read-only · closes when done` bar, and a lavender background
+- closes when the child becomes idle, exits, or is stopped, and opens again on the child's next turn
+
+The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to turn the panes off.
+
 ## Spawn options
 
 | Option                                 | Default                                              | Use                                                                                   |
