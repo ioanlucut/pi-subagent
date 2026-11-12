@@ -50,6 +50,16 @@ test("a turn that ended in a provider error is reported as failed, not finished"
 	assert.equal(pendingResults([run])?.text, "Subagent bbb222 failed (error)\n\nOAuth refresh failed");
 });
 
+test("a long answer is cut, with the command that prints it whole", () => {
+	const run = storedRun("pqr777", answer("x".repeat(20_000)));
+
+	reportSettledTurn(run.runDir);
+	const text = pendingResults([run])?.text ?? "";
+
+	assert.ok(text.length < 16_300, `${text.length} characters`);
+	assert.match(text, /x\n\n\[Cut at 16000 of 20000 characters\. The whole answer: `subagent last pqr777`, before `stop`\.\]$/);
+});
+
 test("a turn with a queued `send` is not reported: the next turn has the result", () => {
 	const run = storedRun("ccc333", answer("Half way."));
 	writeFileSync(join(inboxDir(run.runDir), "1.json"), JSON.stringify({ message: "go on", delivery: "followUp" }));

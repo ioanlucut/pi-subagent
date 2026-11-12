@@ -44,6 +44,8 @@ function usage(): never {
   subagent rename <handle> <name>
   subagent send <handle> [--follow-up] <message>
   subagent wait <handle> [--timeout <seconds>]
+  subagent last <handle>
+  subagent interrupt <handle>
   subagent stop <handle>
   subagent list`);
 }
@@ -230,6 +232,17 @@ function renameSubagent(args: string[]): void {
 	process.stdout.write(`Renamed ${runDisplayName(updated)}\n`);
 }
 
+/** Put a message in the child's inbox; the child takes it within 250 ms. */
+function queueMessage(metadata: RunMetadata, payload: InboxMessage): void {
+	const queueDir = inboxDir(metadata.runDir);
+	mkdirSync(queueDir, { recursive: true, mode: 0o700 });
+	const id = `${Date.now()}-${randomBytes(4).toString("hex")}`;
+	const target = join(queueDir, `${id}.json`);
+	const temporary = `${target}.tmp`;
+	writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
+	renameSync(temporary, target);
+}
+
 function sendSubagent(args: string[]): void {
 	const handle = args.shift();
 	if (!handle) usage();
@@ -245,14 +258,7 @@ function sendSubagent(args: string[]): void {
 	const metadata = getRun(handle);
 	if (!tmuxSessionExists(metadata.tmuxSession)) fail(`${handle} is not running`);
 
-	const queueDir = inboxDir(metadata.runDir);
-	mkdirSync(queueDir, { recursive: true, mode: 0o700 });
-	const id = `${Date.now()}-${randomBytes(4).toString("hex")}`;
-	const target = join(queueDir, `${id}.json`);
-	const temporary = `${target}.tmp`;
-	const payload: InboxMessage = { message, delivery: followUp ? "followUp" : "auto" };
-	writeFileSync(temporary, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
-	renameSync(temporary, target);
+	queueMessage(metadata, { message, delivery: followUp ? "followUp" : "auto" });
 
 	const state = effectiveRunState(metadata);
 	const verb = followUp && state === "busy" ? "Queued follow-up for" : state === "idle" ? "Prompted" : "Steered";
@@ -301,8 +307,28 @@ async function stopSubagent(args: string[]): Promise<void> {
 	markExitKnown(metadata.runDir);
 	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
-	removeRunDir(metadata.runDir);
-	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n`);
+	const kept = removeRunDir(metadata.runDir);
+	const transcript = kept ? `Transcript: ${kept} (\`pi --resume\` in ${metadata.cwd})\n` : "";
+	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n${transcript}`);
+}
+
+function lastSubagent(args: string[]): void {
+	if (args.length !== 1) usage();
+	const metadata = getRun(args[0]);
+	const message = readLatestAssistant(metadata.sessionFile);
+	process.stdout.write(`${metadata.handle} ${effectiveRunState(metadata)}\n\n${message ? assistantText(message) : "(no answer yet)"}\n`);
+}
+
+function interruptSubagent(args: string[]): void {
+	if (args.length !== 1) usage();
+	const metadata = getRun(args[0]);
+	const state = effectiveRunState(metadata);
+	if (state !== "busy" && state !== "starting") {
+		process.stdout.write(`${metadata.handle} is ${state}: nothing to interrupt\n`);
+		return;
+	}
+	queueMessage(metadata, { message: "", delivery: "interrupt" });
+	process.stdout.write(`Interrupting ${runDisplayName(metadata)}. Its turn ends as failed (aborted).\n`);
 }
 
 function listSubagents(args: string[]): void {
@@ -337,6 +363,12 @@ async function main(): Promise<void> {
 			break;
 		case "wait":
 			await waitSubagent(args);
+			break;
+		case "last":
+			lastSubagent(args);
+			break;
+		case "interrupt":
+			interruptSubagent(args);
 			break;
 		case "stop":
 			await stopSubagent(args);

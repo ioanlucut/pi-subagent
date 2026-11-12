@@ -7,6 +7,8 @@ export interface InboxTarget {
 	isIdle(): boolean;
 	/** No `deliverAs`: a new prompt, which starts a run. */
 	send(message: string, deliverAs?: "steer" | "followUp"): void;
+	/** End the current turn. */
+	abort(): void;
 }
 
 /** A prompt that Pi rejects (for example, no login) never starts a run; stop waiting for it after this time. */
@@ -15,7 +17,7 @@ const PROMPT_PENDING_MS = 15_000;
 function isInboxMessage(value: unknown): value is InboxMessage {
 	if (typeof value !== "object" || value === null) return false;
 	const message = value as Record<string, unknown>;
-	return typeof message.message === "string" && (message.delivery === "auto" || message.delivery === "followUp");
+	return typeof message.message === "string" && ["auto", "followUp", "interrupt"].includes(message.delivery as string);
 }
 
 /** Hands the messages that `subagent send` queued in the run's inbox to the child, oldest first. */
@@ -54,6 +56,11 @@ export class InboxDelivery {
 					state: "error",
 					error: error instanceof Error ? error.message : String(error),
 				});
+				continue;
+			}
+			if (payload.delivery === "interrupt") {
+				unlinkSync(path);
+				if (!idle) target.abort();
 				continue;
 			}
 

@@ -13,6 +13,8 @@ import {
 
 /** tmux starts just after the metadata is written; a run this young with no tmux session has not died. */
 const STARTING_GRACE_MS = 30_000;
+/** A longer answer is cut, so one result cannot fill the parent's context. */
+const MAX_RESULT_CHARS = 16_000;
 /** `wait` renews its claim each 500 ms; an older claim is from a `wait` that was killed. */
 const WAITING_MS = 2_000;
 
@@ -52,7 +54,13 @@ export function reportSettledTurn(runDir: string): void {
 	// The parent ended this turn itself (suspend, `stop`): the abort is no news to it.
 	if (run.suspended || existsSync(exitKnownPath(runDir))) return;
 	const message = readLatestAssistant(run.sessionFile);
-	if (message) writeResult(run, turnOutcome(message), assistantText(message));
+	if (!message) return;
+	const text = assistantText(message);
+	const body =
+		text.length <= MAX_RESULT_CHARS
+			? text
+			: `${text.slice(0, MAX_RESULT_CHARS)}\n\n[Cut at ${MAX_RESULT_CHARS} of ${text.length} characters. The whole answer: \`subagent last ${run.handle}\`, before \`stop\`.]`;
+	writeResult(run, turnOutcome(message), body);
 }
 
 /** `stop` calls this before it ends the child, so the end is not reported as a surprise. */

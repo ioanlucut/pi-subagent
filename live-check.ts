@@ -114,12 +114,28 @@ try {
 	for (const word of ["ONE", "TWO"]) assert.match(transcript, new RegExp(`"role":"assistant","content":\\[[^\\]]*"text":"${word}"`), `the child never answered ${word}`);
 	console.log("ok  two messages to the idle child in one tick both got an answer");
 
+	assert.equal(cli("send", handle, "Run the bash command `sleep 60; echo LATE`, then reply with exactly LATE.").status, 0);
+	await until(/^widget ⟳ counter .*bash sleep 60/, mark);
+	const interrupt = cli("interrupt", handle);
+	assert.equal(interrupt.status, 0, interrupt.stderr);
+	mark = await until(/^result Subagent counter \(\w+\) failed \(aborted\)/, mark);
+	mark = await until(/^settled$/, mark);
+	assert.doesNotMatch(readFileSync(join(agentDir, "subagents", handle, "session.jsonl"), "utf8"), /"text":"LATE"/);
+	console.log("ok  interrupt ended the busy child's turn before its command finished");
+
 	spawnSync("tmux", ["kill-session", "-t", `pi-subagent-${handle}`]);
 	mark = await until(/^result (.|\n)*Subagent counter \(\w+\) exited\n/, mark);
 	await until(/^settled$/, mark);
 	await new Promise((resolve) => setTimeout(resolve, 3000));
 	assert.equal(events.filter((event) => /Subagent counter \(\w+\) exited\n/.test(event)).length, 1);
 	console.log("ok  a child whose process was killed was reported as exited, once");
+
+	const stop = cli("stop", handle);
+	const kept = /^Transcript: (\S+) /m.exec(stop.stdout)?.[1];
+	assert.ok(kept, `stop printed no transcript: ${stop.stdout}`);
+	assert.match(readFileSync(kept, "utf8"), /"text":"TWO"/);
+	assert.ok(kept.startsWith(join(agentDir, "sessions")), kept);
+	console.log("ok  stop kept the transcript in Pi's sessions");
 } catch (error) {
 	failed = true;
 	console.error(`FAILED: ${error instanceof Error ? error.message : error}\n--- events\n${events.join("\n")}`);

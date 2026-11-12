@@ -4,7 +4,7 @@ Observable, persistent [Pi](https://pi.dev) subagents for independent reviews, i
 
 Each subagent is a separate Pi process in its own tmux session, with its own JSONL transcript. The parent spawns it with a CLI, keeps working, and later waits for its answer, steers it, or attaches to its TUI. A child is a normal, full Pi, not a stripped-down tool call.
 
-This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at), with two fixes. Upstream has issues and pull requests disabled, so they live here:
+This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at). Upstream has issues and pull requests disabled, so the changes live here. It adds results that arrive as messages, a row per child below the editor, read-only Herdr panes, kept transcripts, `last` and `interrupt`, and these two fixes:
 
 | Issue                                                   | Upstream behaviour                                                                                                                                           | Here                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
@@ -48,7 +48,7 @@ subagent spawn --name review --tools read,grep,find,ls --prompt "Review the curr
 # Attach: tmux attach -t pi-subagent-a1b2c3
 
 subagent wait a1b2c3    # blocks until the child is idle, then prints its final answer
-subagent stop a1b2c3    # removes the child, its tmux session, and its transcript
+subagent stop a1b2c3    # removes the child and its tmux session; keeps its transcript
 ```
 
 Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider, model, and thinking level that `spawn` reads. A `!` command or another terminal does not: there `spawn` fails unless you pass `--provider` and `--model`, the child has no parent session, so it is never suspended or resumed, and `subagent list` shows the children of all sessions. Stop such children yourself.
@@ -64,7 +64,9 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 | `subagent send <handle> <message>`                               | Idle child: start a new turn. Busy child: steer the current turn.                                                                                                               |
 | `subagent send <handle> --follow-up <message>`                   | Busy child: queue a turn after the current one.                                                                                                                                 |
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
-| `subagent stop <handle>`                                         | Remove the child for good.                                                                                                                                                      |
+| `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
+| `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
+| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle.                                                                                                                                                      |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
@@ -90,10 +92,10 @@ Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print a
 
 ### Watch children in Herdr
 
-When the parent Pi runs in [Herdr](https://github.com/herdrdev/herdr), each working child opens in a pane in the same tab, beside the parent pane. The first child pane goes on the right of the parent; more children stack below it. Each pane:
+When the parent Pi runs in [Herdr](https://github.com/herdrdev/herdr), each working child opens in a pane in the same tab, beside the parent pane. The first child pane goes on the right of the parent; more children stack below it, each with the same height. Each pane:
 
 - shows the child's live TUI, read-only (`tmux attach -r`), so keys cannot reach the child
-- is marked as disposable: the border label `◆ subagent <name>`, a violet `SUBAGENT <name> · read-only · closes when done` bar, and a lavender background
+- is marked as disposable: the border label `◆ subagent <name>`, a violet `SUBAGENT <name> · read-only · closes when done` bar, and a lavender background. When you attach with `/subagent`, keys reach the child and the bar shows only `SUBAGENT <name>`.
 - closes when the child becomes idle, exits, or is stopped, and opens again on the child's next turn
 
 The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to turn the panes off.
@@ -190,7 +192,7 @@ subagent spawn --name implement --file /tmp/spec.md \
 
 Two children that edit the same checkout will conflict. Give each its own worktree with `--cwd`.
 
-If the `--cwd` directory has an executable `pi-test.sh`, the child runs it in place of `pi` (an upstream hook for testing). Do not spawn into a checkout you do not trust.
+`PI_SUBAGENT_PI` names the program a child runs in place of `pi`, for tests. Upstream ran an executable `pi-test.sh` from `--cwd`, so a cloned repository could choose the program; this fork does not.
 
 ## Lifecycle
 
@@ -201,8 +203,10 @@ If the `--cwd` directory has an executable `pi-test.sh`, the child runs it in pl
 | The parent quits or switches session                                   | Running children are suspended: the process stops, transcript and metadata stay. Children that already exited on their own are removed. |
 | The parent dies without quitting                                       | The next Pi to start, in any session, suspends them.                                                                                    |
 | The parent session starts again (`pi --resume`, `pi --session <file>`) | Suspended children start again, idle, with their full history.                                                                          |
-| `subagent stop`                                                        | Removed for good: tmux session, transcript, metadata.                                                                                   |
-| A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed for good.                                                        |
+| `subagent stop`                                                        | Removed: tmux session and metadata. A transcript with an answer is copied first, see below.                                             |
+| A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed. A child tmux session whose run directory is gone is ended.     |
+
+A removed child's transcript goes to Pi's sessions for its working directory, under its Pi session ID: `~/.pi/agent/sessions/--<cwd>--/<time>_<id>.jsonl`. `stop` prints the path. `pi --resume` in that directory lists it, so you can read what the child did, or continue it as a normal session. A child that never answered leaves no transcript.
 
 A suspended child shows as `exited`, is hidden from the rows below the editor and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
 
@@ -241,12 +245,14 @@ The tests use `node --test` with no dependencies. Each test starts its own tmux 
 npm run check:live
 ```
 
-The live check starts a real parent Pi in RPC mode and a real child, with this checkout as the package. It uses a temporary agent directory that links your logins, so it touches no real run or session. It needs a model login, takes about two minutes, and costs a few cents. It fails unless:
+The live check starts a real parent Pi in RPC mode and a real child, with this checkout as the package. It uses a temporary agent directory that links your logins, so it touches no real run or session. It needs a model login, takes about three minutes, and costs a few cents. It fails unless:
 
 - the child's result arrives in the parent as a message, and the agent does not run `subagent wait`
 - the widget shows the busy child with its time, tool call, tokens, and cost
 - two messages that an idle child finds in the same tick both get an answer
+- `interrupt` ends a busy child's turn before its command finishes
 - a child whose process is killed is reported as `exited`, once
+- `stop` keeps the transcript in Pi's sessions
 
 ## Upstream
 
@@ -260,4 +266,4 @@ Upstream has no license file.
 
 ## Credits
 
-Pi Subagent is the work of [Mario Zechner](https://github.com/badlogic), who also created [Pi](https://pi.dev). The design is his: each subagent is a full Pi in its own tmux session, results come from the durable transcript and not the screen, and children are suspended and resumed with their parent session. This fork adds only the two fixes above, their tests, and this README. Thank you, Mario, for building Pi and this extension, and for sharing them.
+Pi Subagent is the work of [Mario Zechner](https://github.com/badlogic), who also created [Pi](https://pi.dev). The design is his: each subagent is a full Pi in its own tmux session, results come from the durable transcript and not the screen, and children are suspended and resumed with their parent session. This fork adds the changes above, their tests, and this README. Thank you, Mario, for building Pi and this extension, and for sharing them.

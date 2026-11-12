@@ -5,6 +5,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
@@ -15,14 +16,17 @@ import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
+	getRunsDir,
 	listRuns,
 	processStartTime,
 	pruneStaleRuns,
 	readMetadata,
+	removeRunDir,
 	resumeSuspendedRuns,
 	suspendOrphanedRuns,
 	suspendRuns,
 	tmuxSessionExists,
+	updateMetadata,
 } from "./shared.ts";
 
 const cli = join(import.meta.dirname, "subagent.ts");
@@ -207,12 +211,13 @@ test("a failed relaunch leaves no launch file with the caller's environment behi
 test("suspendRuns stops all children at the same time", async () => {
 	spawnChildren(3);
 	const runs = listRuns();
-	// The fake child never reports "exited", so each stop waits for the full 2 s shutdown timeout.
+	// The fake child never reports "exited", so each stop waits for the full 2 s shutdown timeout:
+	// one by one takes at least 3 × 2 s, at the same time about 2 s plus a loaded machine's overhead.
 	const started = Date.now();
 
 	await suspendRuns(runs);
 
-	assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`);
+	assert.ok(Date.now() - started < 6000, `took ${Date.now() - started} ms`);
 	for (const run of runs) {
 		assert.equal(tmuxSessionExists(run.tmuxSession), false);
 		assert.equal(readMetadata(run.runDir)?.suspended, true);
@@ -407,4 +412,117 @@ test("spawn tells the agent not to wait only when the parent delivers results", 
 
 	assert.doesNotMatch(quiet.stdout, /Result:/);
 	assert.match(notified.stdout, /\nResult: arrives as a message when the turn ends\. Do not run `subagent wait`\.\n$/);
+});
+
+/** A tmux session started the way `launchRun` starts a child, for the run directory `runDir`. */
+function childSession(name: string, runDir: string): void {
+	const result = spawnSync("tmux", ["new-session", "-d", "-s", name, "--", "/bin/sh", "-c", "sleep 60", "launch", join(runDir, "launch.json")]);
+	assert.equal(result.status, 0, String(result.stderr));
+}
+
+test("a child session whose run directory is gone is ended; others are left alone", async () => {
+	startTmuxServer({ PATH: basePath });
+	const live = join(getRunsDir(), "aaa111");
+	mkdirSync(live, { recursive: true });
+	childSession("pi-subagent-aaa111", live);
+	childSession("pi-subagent-bbb222", join(getRunsDir(), "bbb222"));
+	// Another Pi profile keeps its runs in another agent dir; its live child is not an orphan.
+	const otherProfile = join(root, "other-agent", "subagents", "ccc333");
+	mkdirSync(otherProfile, { recursive: true });
+	childSession("pi-subagent-ccc333", otherProfile);
+
+	await suspendOrphanedRuns();
+
+	assert.equal(tmuxSessionExists("pi-subagent-aaa111"), true);
+	assert.equal(tmuxSessionExists("pi-subagent-bbb222"), false);
+	assert.equal(tmuxSessionExists("pi-subagent-ccc333"), true);
+	assert.equal(tmuxSessionExists("server"), true);
+});
+
+test("an executable pi-test.sh in the working directory does not replace pi", async () => {
+	writeFileSync(join(root, "pi-test.sh"), `#!/bin/sh\ntouch "${join(root, "ran-pi-test")}"\nsleep 60\n`, { mode: 0o755 });
+
+	spawnChildren(1);
+
+	await childEnv(agentDir());
+	assert.equal(existsSync(join(root, "ran-pi-test")), false);
+});
+
+test("PI_SUBAGENT_PI names the program the child runs in place of pi", async () => {
+	const other = fakePi(join(root, "other"));
+	const result = runCli(["spawn", "--cwd", root, "--prompt", "hi"], {
+		...spawnEnv(agentDir(), join(root, "no-pi-here")),
+		PI_SUBAGENT_PI: join(other, "pi"),
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.ok((await childEnv(agentDir())).get("PATH"), "the program ran");
+});
+
+/** A run directory whose transcript has a session header for `cwd` and one answer. */
+function transcriptRun(handle: string, cwd: string): string {
+	const runDir = join(agentDir(), "subagents", handle);
+	mkdirSync(runDir, { recursive: true });
+	const sessionFile = join(runDir, "session.jsonl");
+	writeFileSync(
+		sessionFile,
+		`${JSON.stringify({ type: "session", version: 3, id: "child-session", timestamp: "2026-11-12T10:00:00.123Z", cwd })}\n` +
+			`${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "Done." }] } })}\n`,
+	);
+	writeFileSync(join(runDir, "metadata.json"), JSON.stringify({ version: 1, handle, tmuxSession: `pi-subagent-${handle}`, runDir, sessionFile, cwd }));
+	return runDir;
+}
+
+test("removing a run moves its transcript into Pi's sessions, where `pi --resume` lists it", () => {
+	const runDir = transcriptRun("tra111", "/repo/my-app");
+	const transcript = readFileSync(join(runDir, "session.jsonl"), "utf8");
+
+	const kept = removeRunDir(runDir);
+
+	assert.equal(kept, join(agentDir(), "sessions", "--repo-my-app--", "2026-11-12T10-00-00-123Z_child-session.jsonl"));
+	assert.equal(readFileSync(kept, "utf8"), transcript);
+	assert.equal(existsSync(runDir), false);
+});
+
+test("a run with no answer in its transcript leaves nothing in Pi's sessions", () => {
+	const runDir = transcriptRun("tra222", "/repo/my-app");
+	writeFileSync(join(runDir, "session.jsonl"), readFileSync(join(runDir, "session.jsonl"), "utf8").split("\n")[0] + "\n");
+
+	assert.equal(removeRunDir(runDir), undefined);
+	assert.equal(existsSync(join(agentDir(), "sessions")), false);
+});
+
+test("stop prints where the transcript went", () => {
+	transcriptRun("tra333", "/repo/my-app");
+
+	const result = runCli(["stop", "tra333"], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /^Stopped tra333\nTranscript: .*--repo-my-app--\/2026-11-12T10-00-00-123Z_child-session\.jsonl \(`pi --resume` in \/repo\/my-app\)\n$/);
+});
+
+test("last prints the latest answer and the state, without waiting", () => {
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	const [run] = listRuns();
+	updateMetadata(run.runDir, { state: "busy" });
+
+	const result = runCli(["last", handle], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "abc123 busy\n\nAll good.\n");
+});
+
+test("interrupt queues an interrupt for a busy child, and tells that an idle child has nothing to stop", () => {
+	const handle = idleRun({ content: [], stopReason: "stop" });
+	const [run] = listRuns();
+
+	assert.equal(runCli(["interrupt", handle], {}).stdout, "abc123 is idle: nothing to interrupt\n");
+
+	updateMetadata(run.runDir, { state: "busy" });
+	const result = runCli(["interrupt", handle], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "Interrupting abc123. Its turn ends as failed (aborted).\n");
+	const [file] = readdirSync(join(run.runDir, "inbox"));
+	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
 });

@@ -245,6 +245,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		inbox.deliver({
 			isIdle: () => ctx.isIdle(),
 			send: (message, deliverAs) => pi.sendUserMessage(message, deliverAs && { deliverAs }),
+			abort: () => ctx.abort(),
 		});
 	};
 
