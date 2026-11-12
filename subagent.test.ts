@@ -34,6 +34,8 @@ beforeEach(() => {
 	process.env.TMUX_TMPDIR = join(root, "tmux");
 	mkdirSync(process.env.TMUX_TMPDIR);
 	delete process.env.TMUX;
+	// The caller's own NODE_OPTIONS would reach the child and hide what the tests check.
+	delete process.env.NODE_OPTIONS;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
