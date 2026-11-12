@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { clearResults, markExitKnown, markWaiting, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { claimResultDelivery, clearResults, markExitKnown, markWaiting, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
 import { inboxDir, writeMetadata, type RunMetadata } from "./shared.ts";
 
 let root: string;
@@ -144,4 +144,22 @@ test("a turn that ended because the parent suspended or stopped the child is not
 	reportSettledTurn(stopping.runDir);
 
 	assert.equal(pendingResults([suspended, stopping]), undefined);
+});
+
+test("only a TUI or RPC parent delivers results, and it says so to the `spawn` its tools run", () => {
+	const saved = process.env.PI_SUBAGENT_NOTIFY;
+	try {
+		delete process.env.PI_SUBAGENT_NOTIFY;
+		assert.equal(claimResultDelivery("tui"), true);
+		assert.equal(process.env.PI_SUBAGENT_NOTIFY, "1");
+
+		// A `pi -p` that a delivering parent started inherits "1", but print mode ends with the turn.
+		assert.equal(claimResultDelivery("print"), false);
+		assert.equal(process.env.PI_SUBAGENT_NOTIFY, "0");
+
+		assert.equal(claimResultDelivery("rpc"), false, "the user turned it off");
+	} finally {
+		if (saved === undefined) delete process.env.PI_SUBAGENT_NOTIFY;
+		else process.env.PI_SUBAGENT_NOTIFY = saved;
+	}
 });

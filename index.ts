@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import { InboxDelivery } from "./inbox.ts";
-import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -188,9 +188,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
 			});
 
-			// Print and JSON modes end with the turn, so no later message can arrive: there the agent uses `wait`.
-			if ((ctx.mode === "tui" || ctx.mode === "rpc") && process.env.PI_SUBAGENT_NOTIFY !== "0") {
-				process.env.PI_SUBAGENT_NOTIFY = "1";
+			if (claimResultDelivery(ctx.mode)) {
 				resultsContext = ctx;
 				resultsTimer = setInterval(deliverResults, 1000);
 				resultsTimer.unref();

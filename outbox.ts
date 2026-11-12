@@ -20,6 +20,17 @@ const outboxDir = (runDir: string): string => join(runDir, "outbox");
 const exitKnownPath = (runDir: string): string => join(runDir, "exit-known");
 const waitingPath = (runDir: string): string => join(runDir, "waiting");
 
+/**
+ * Whether this Pi delivers results. Print and JSON modes end with the turn, so no later message can
+ * arrive. The answer goes into the environment for the `spawn` that this Pi's bash tool runs; "0" from
+ * the user turns delivery off, and stays.
+ */
+export function claimResultDelivery(mode: string): boolean {
+	const delivers = (mode === "tui" || mode === "rpc") && process.env.PI_SUBAGENT_NOTIFY !== "0";
+	process.env.PI_SUBAGENT_NOTIFY = delivers ? "1" : "0";
+	return delivers;
+}
+
 /** Queue one result for the parent. Never creates the run directory: `stop` may have removed it. */
 function writeResult(run: RunMetadata, outcome: string, body: string): void {
 	const dir = outboxDir(run.runDir);
