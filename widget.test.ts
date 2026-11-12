@@ -85,9 +85,9 @@ test("each child gets one row: state, name, time in this turn, last action, toke
 	);
 
 	assert.deepEqual(lines, [
-		"⟳ review-spec  1m05s  bash npm test               ↓12k $0.42",
-		"✓ standards           No findings.                ↓900 $0.02",
-		"✗ ccc333              No API key                    ↓0 $0.00",
+		"⟳ review-spec  1m05s   bash npm test              ↓12k $0.42",
+		"✓ standards            No findings.               ↓900 $0.02",
+		"✗ ccc333               No API key                   ↓0 $0.00",
 	]);
 	assert.deepEqual(lines.map((line) => line.length), [60, 60, 60]);
 });
@@ -96,7 +96,7 @@ test("a row never exceeds the width: the last action is cut, the totals stay", (
 	const lines = widgetLines([row("aaa111", "busy", { last: "bash ".padEnd(200, "x"), outputTokens: 1_500_000, cost: 12 }, "a-very-long-child-name-that-goes-on-and-on")], plain, 70, 0);
 
 	assert.equal(lines[0].length, 70);
-	assert.match(lines[0], /^⟳ a-very-long-child-name-… {9}bash x+… ↓1\.5M \$12\.00$/);
+	assert.match(lines[0], /^⟳ a-very-long-child-name-… {10}bash x+… ↓1\.5M \$12\.00$/);
 });
 
 test("the state decides the icon color, and more than five children are counted", () => {
@@ -105,7 +105,7 @@ test("the state decides the icon color, and more than five children are counted"
 	const lines = widgetLines(rows, theme, 40, 0);
 
 	assert.equal(lines.length, 6);
-	assert.match(lines[0], /^<muted>◌<\/> a {9}<muted>starting/);
+	assert.match(lines[0], /^<muted>◌<\/> a {10}<muted>starting/);
 	assert.equal(lines[5], "<dim>+2 more · /subagent to attach</>");
 	assert.match(widgetLines([row("a", "busy")], theme, 40, 0)[0], /^<warning>⟳<\/>/);
 	assert.deepEqual(widgetLines([], theme, 40, 0), []);
@@ -127,4 +127,14 @@ test("a row with wide characters is as wide as any other row", () => {
 	);
 
 	assert.deepEqual(lines.map(displayWidth), [50, 50]);
+});
+
+test("a child busy for 10 minutes or 10 hours keeps its row the same width", () => {
+	const now = 100 * 3_600_000;
+	const lines = [0, 65_000, 600_000, 3_599_000, 3_900_000, 36_000_000].map(
+		(ms) => widgetLines([row("aaa111", "busy", { last: "bash npm test", turnStartedAt: now - ms }, "review")], plain, 60, now)[0],
+	);
+
+	assert.deepEqual(lines.map((line) => line.length), [60, 60, 60, 60, 60, 60]);
+	assert.match(lines[3], /^⟳ review  59m59s  bash npm test/);
 });

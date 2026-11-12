@@ -16,6 +16,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
+	guarded,
 	getRunsDir,
 	listRuns,
 	processStartTime,
@@ -525,4 +526,25 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.equal(result.stdout, "Interrupting abc123. Its turn ends as failed (aborted).\n");
 	const [file] = readdirSync(join(run.runDir, "inbox"));
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
+});
+
+test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {
+	const logged: string[] = [];
+	const error = console.error;
+	console.error = (message: string) => void logged.push(message);
+	let calls = 0;
+	try {
+		const tick = guarded("widget", () => {
+			calls++;
+			throw new RangeError("Invalid count value: -1");
+		});
+		tick();
+		tick();
+	} finally {
+		console.error = error;
+	}
+
+	assert.equal(calls, 2);
+	assert.equal(logged.length, 1);
+	assert.match(logged[0], /^pi-subagent: widget failed, retrying each tick: RangeError: Invalid count value: -1/);
 });
