@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import {
+	claimRunDir,
 	listRuns,
 	processStartTime,
 	pruneStaleRuns,
@@ -106,6 +107,7 @@ const spawnEnv = (agentDir: string, bin: string): NodeJS.ProcessEnv => ({
 	PI_PROVIDER: "test",
 	PI_MODEL: "test",
 	PI_SUBAGENT_RUN_DIR: "",
+	PI_SUBAGENT_NESTED: "",
 });
 
 test("spawn gives the child the caller's agent dir, not the tmux server's", async () => {
@@ -360,4 +362,25 @@ test("pruneStaleRuns keeps an old run whose child still runs", () => {
 	pruneStaleRuns();
 
 	assert.equal(existsSync(live), true);
+});
+
+test("a child claims its run for its own process: a Pi started from its tools has no run and cannot spawn", () => {
+	const state = globalThis as { piSubagentRunDir?: string };
+	process.env.PI_SUBAGENT_RUN_DIR = "/runs/abc123";
+	try {
+		assert.equal(claimRunDir(), "/runs/abc123");
+		assert.equal(process.env.PI_SUBAGENT_RUN_DIR, undefined);
+		assert.equal(claimRunDir(), "/runs/abc123", "a reload in the same process keeps the run");
+
+		// A process started from the child's tools inherits this environment, without the run.
+		const nested = runCli(["spawn", "--cwd", root, "--prompt", "hi"], { PI_PROVIDER: "test", PI_MODEL: "test" });
+		assert.equal(nested.status, 1);
+		assert.match(nested.stderr, /Nested subagents are disabled/);
+		delete state.piSubagentRunDir;
+		assert.equal(claimRunDir(), undefined);
+	} finally {
+		delete state.piSubagentRunDir;
+		delete process.env.PI_SUBAGENT_RUN_DIR;
+		delete process.env.PI_SUBAGENT_NESTED;
+	}
 });

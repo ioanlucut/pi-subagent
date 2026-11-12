@@ -185,7 +185,7 @@ If the `--cwd` directory has an executable `pi-test.sh`, the child runs it in pl
 | `subagent stop`                                                        | Removed for good: tmux session, transcript, metadata.                                                                                   |
 | A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed for good.                                                        |
 
-A suspended child shows as `exited`, is hidden from the status line and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents.
+A suspended child shows as `exited`, is hidden from the status line and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
 
 ## How it works
 
@@ -200,7 +200,8 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 ```
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
-- `index.ts` is the extension. In the parent it shows the status line, adds `/subagent`, and suspends and resumes children. In the child it reads `inbox/` and keeps `metadata.json` up to date.
+- `index.ts` is the extension. In the parent it shows the status line, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date.
+- `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
 - `launcher.ts` runs inside the tmux pane. tmux gives a new pane the tmux server's environment, so the CLI saves the caller's environment in a private `launch.json`. The launcher restores it, deletes the file, and becomes `pi`.
 - `wait` reads the child's state from `metadata.json` and its answer from `session.jsonl`, never from the terminal screen.
 
