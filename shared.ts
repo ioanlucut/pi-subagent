@@ -361,6 +361,16 @@ export function processStartTime(pid: number): string | undefined {
 	return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 }
 
+const STALE_RUN_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Remove runs of any session that have no live child and were last updated more than 14 days ago. */
+export function pruneStaleRuns(): void {
+	const cutoff = Date.now() - STALE_RUN_MS;
+	for (const run of listRuns()) {
+		if (Date.parse(run.updatedAt) < cutoff && !tmuxSessionExists(run.tmuxSession)) removeRunDir(run.runDir);
+	}
+}
+
 /** Relaunch the session's children that were suspended. `onError` gets each run that could not start. */
 export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
 	for (const run of listRuns(sessionId)) {

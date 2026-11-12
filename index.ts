@@ -9,6 +9,7 @@ import {
 	inboxDir,
 	processStartTime,
 	listRuns,
+	pruneStaleRuns,
 	readMetadata,
 	removeRunDir,
 	resumeSuspendedRuns,
@@ -162,6 +163,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		pi.on("session_start", async (_event, ctx) => {
 			// Suspend children of parents that died without shutdown, so they relaunch when their session resumes.
 			await suspendOrphanedRuns();
+			// Without this, a child nobody stopped stays on disk and relaunches each time its session resumes.
+			pruneStaleRuns();
 			// Relaunch children that were suspended when this session was last quit or switched away from.
 			resumeSuspendedRuns(ctx.sessionManager.getSessionId(), (run, message) => {
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
