@@ -1,13 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
+import { InboxDelivery } from "./inbox.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
-	inboxDir,
 	processStartTime,
 	listRuns,
 	pruneStaleRuns,
@@ -17,7 +16,6 @@ import {
 	runDisplayName,
 	suspendOrphanedRuns,
 	suspendRuns,
-	type InboxMessage,
 	type RunMetadata,
 	tmuxSessionExists,
 	updateMetadata,
@@ -25,12 +23,6 @@ import {
 import { HerdrPanes } from "./herdr-panes.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
-
-function isInboxMessage(value: unknown): value is InboxMessage {
-	if (typeof value !== "object" || value === null) return false;
-	const message = value as Record<string, unknown>;
-	return typeof message.message === "string" && (message.delivery === "auto" || message.delivery === "followUp");
-}
 
 function displayState(metadata: RunMetadata): string {
 	return effectiveRunState(metadata).padEnd(8);
@@ -201,7 +193,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	let currentContext: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let processing = false;
 	let sessionName: string | undefined;
 
 	const syncSessionName = (): void => {
@@ -213,52 +204,16 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		sessionName = next;
 	};
 
-	const processInbox = async (): Promise<void> => {
-		if (processing || !currentContext) return;
-		syncSessionName();
-		const queueDir = inboxDir(runDir);
-		if (!existsSync(queueDir)) return;
-		processing = true;
-		try {
-			for (const name of readdirSync(queueDir)
-				.filter((entry) => entry.endsWith(".json"))
-				.sort()) {
-				const path = join(queueDir, name);
-				let payload: InboxMessage;
-				try {
-					const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-					if (!isInboxMessage(value)) throw new Error("Invalid inbox message");
-					payload = value;
-				} catch (error) {
-					unlinkSync(path);
-					updateMetadata(runDir, {
-						state: "error",
-						error: error instanceof Error ? error.message : String(error),
-					});
-					continue;
-				}
+	const inbox = new InboxDelivery(runDir);
 
-				updateMetadata(runDir, { state: "busy", error: undefined });
-				try {
-					if (currentContext.isIdle()) {
-						pi.sendUserMessage(payload.message);
-					} else {
-						pi.sendUserMessage(payload.message, {
-							deliverAs: payload.delivery === "followUp" ? "followUp" : "steer",
-						});
-					}
-					unlinkSync(path);
-				} catch (error) {
-					updateMetadata(runDir, {
-						state: currentContext.isIdle() ? "idle" : "busy",
-						error: error instanceof Error ? error.message : String(error),
-					});
-					return;
-				}
-			}
-		} finally {
-			processing = false;
-		}
+	const processInbox = (): void => {
+		const ctx = currentContext;
+		if (!ctx) return;
+		syncSessionName();
+		inbox.deliver({
+			isIdle: () => ctx.isIdle(),
+			send: (message, deliverAs) => pi.sendUserMessage(message, deliverAs && { deliverAs }),
+		});
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -274,14 +229,15 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 		syncSessionName();
 		if (!timer) {
-			timer = setInterval(() => void processInbox(), 250);
+			timer = setInterval(processInbox, 250);
 			timer.unref();
 		}
-		void processInbox();
+		processInbox();
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
 		currentContext = ctx;
+		inbox.promptStarted();
 		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined });
 	});
 
