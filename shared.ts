@@ -106,6 +106,12 @@ export function inboxDir(runDir: string): string {
 	return join(runDir, "inbox");
 }
 
+/** Whether a `send` is queued that the child has not taken yet. */
+export function inboxHasMessages(runDir: string): boolean {
+	const dir = inboxDir(runDir);
+	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".json"));
+}
+
 export function isValidRunName(value: unknown): value is string {
 	return (
 		typeof value === "string" &&
@@ -324,6 +330,11 @@ export function readLatestAssistant(sessionFile: string): AssistantMessage | und
 		}
 	}
 	return activeBranch(entries).findLast(isAssistantEntry)?.message;
+}
+
+/** How a turn ended, as `wait` and the result message say it. A failed turn is no result. */
+export function turnOutcome(message: AssistantMessage): "finished" | "failed (error)" | "failed (aborted)" {
+	return message.stopReason === "error" || message.stopReason === "aborted" ? `failed (${message.stopReason})` : "finished";
 }
 
 export function assistantText(message: AssistantMessage): string {

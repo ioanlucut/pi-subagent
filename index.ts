@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import { InboxDelivery } from "./inbox.ts";
+import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -151,6 +153,27 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			);
 		};
 
+		let resultsTimer: ReturnType<typeof setInterval> | undefined;
+		let resultsContext: ExtensionContext | undefined;
+
+		/** Put the results of this session's children into the chat, so the agent does not block on `wait`. */
+		const deliverResults = (): void => {
+			const ctx = resultsContext;
+			if (!ctx) return;
+			// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
+			if (!ctx.isIdle() && ctx.signal === undefined) return;
+			const runs = listRuns(ctx.sessionManager.getSessionId());
+			reportExitedRuns(runs);
+			const pending = pendingResults(runs);
+			if (!pending) return;
+			// Idle: starts a turn. Busy: waits until the current work is done.
+			pi.sendMessage(
+				{ customType: "subagent-result", content: pending.text, display: true },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+			for (const file of pending.files) rmSync(file, { force: true });
+		};
+
 		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
 		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
 		process.env.PI_SUBAGENT_PARENT_STARTED = processStartTime(process.pid) ?? "";
@@ -165,6 +188,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
 			});
 
+			if (claimResultDelivery(ctx.mode)) {
+				resultsContext = ctx;
+				resultsTimer = setInterval(deliverResults, 1000);
+				resultsTimer.unref();
+			}
+
 			if (!ctx.hasUI) return;
 			widgetContext = ctx;
 			refreshWidget();
@@ -173,6 +202,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
+			if (resultsTimer) clearInterval(resultsTimer);
+			resultsTimer = undefined;
+			resultsContext = undefined;
 			if (widgetTimer) clearInterval(widgetTimer);
 			widgetTimer = undefined;
 			widgetContext = undefined;
@@ -243,7 +275,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", (_event, ctx) => {
 		currentContext = ctx;
-		if (ctx.isIdle()) updateMetadata(runDir, { state: "idle" });
+		if (!ctx.isIdle()) return;
+		updateMetadata(runDir, { state: "idle" });
+		reportSettledTurn(runDir);
 	});
 
 	pi.on("session_shutdown", (event) => {

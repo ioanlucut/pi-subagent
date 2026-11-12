@@ -55,7 +55,11 @@ Three additional built-in tools are available but off by default:
 
 Spawn prints a random handle and the exact tmux attach command. Keep the handle for later commands. Subagents persist after their current turn completes: `wait`, completion, and becoming idle do not terminate them. They survive `/reload`. When the spawning Pi session quits or is replaced, or its process dies, they are suspended and relaunched idle with their history when that session is resumed. They are only removed by `subagent stop`.
 
-## Inspect and wait
+## Get the result
+
+When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, or `exited`, followed by its answer. A failed or exited child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
+
+Without that line (print mode, a plain terminal, `PI_SUBAGENT_NOTIFY=0`), no message arrives: use `wait`.
 
 ```sh
 subagent status <handle>
