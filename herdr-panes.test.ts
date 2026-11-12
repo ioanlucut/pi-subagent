@@ -111,3 +111,8 @@ test("the pane command marks the child as a disposable subagent and attaches rea
 	assert.match(command, /set-option -w -t pi-subagent-aaa window-style 'bg=#f3edff'/);
 	assert.match(command, / \\; attach-session -r -t pi-subagent-aaa$/);
 });
+
+test("a child name cannot run a command through the tmux status line", () => {
+	const command = watchCommand(run("aaa", "x #(touch /tmp/pwned) #{pane_id}"));
+	assert.match(command, /SUBAGENT x ##\(touch \/tmp\/pwned\) ##\{pane_id\} · read-only/);
+});
