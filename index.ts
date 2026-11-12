@@ -23,6 +23,7 @@ import {
 	updateMetadata,
 } from "./shared.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
+import { ActivityTracker, widgetLines } from "./widget.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
 
@@ -127,6 +128,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				? new HerdrPanes(process.env.HERDR_PANE_ID)
 				: undefined;
 
+		const activity = new ActivityTracker();
+
 		const refreshWidget = (): void => {
 			if (!widgetContext) return;
 			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
@@ -138,17 +141,14 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const visible = activeRuns.slice(0, 5).map(({ run, state }) => {
-				const color =
-					state === "busy" ? "warning" : state === "idle" ? "success" : state === "error" ? "error" : "muted";
-				return widgetContext!.ui.theme.fg(color, `${run.name ?? run.handle}:${state}`);
-			});
-			if (activeRuns.length > visible.length) {
-				visible.push(widgetContext.ui.theme.fg("muted", `+${activeRuns.length - visible.length}`));
-			}
 			widgetContext.ui.setWidget(
 				"subagents",
-				[widgetContext.ui.theme.fg("dim", "subagents: ") + visible.join(widgetContext.ui.theme.fg("dim", " | "))],
+				widgetLines(
+					activeRuns.map(({ run, state }) => ({ run, state, activity: activity.read(run) })),
+					widgetContext.ui.theme,
+					// Pi pads each widget line by one column on each side.
+					(process.stdout.columns ?? 80) - 2,
+				),
 				{ placement: "belowEditor" },
 			);
 		};

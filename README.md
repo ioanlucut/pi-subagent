@@ -67,7 +67,12 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 | `subagent stop <handle>`                                         | Remove the child for good.                                                                                                                                                      |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
-A status line below the Pi editor shows each child's name and state (`busy`, `idle`, `error`).
+Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
+
+```text
+⟳ review-spec  1m05s  bash npm test               ↓12k $0.42
+✓ standards           No findings.                ↓900 $0.02
+```
 
 ### Results arrive as messages
 
@@ -199,7 +204,7 @@ If the `--cwd` directory has an executable `pi-test.sh`, the child runs it in pl
 | `subagent stop`                                                        | Removed for good: tmux session, transcript, metadata.                                                                                   |
 | A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed for good.                                                        |
 
-A suspended child shows as `exited`, is hidden from the status line and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
+A suspended child shows as `exited`, is hidden from the rows below the editor and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
 
 ## How it works
 
@@ -210,13 +215,14 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
    │                                            inbox/          messages from `send`
    │                                            outbox/         results for the parent
    │
-   └─ extension: status line, /subagent,       tmux session pi-subagent-<handle>
+   └─ extension: child rows, /subagent,        tmux session pi-subagent-<handle>
       suspend and resume                         └─ launcher.ts ─► pi (the child)
 ```
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
-- `index.ts` is the extension. In the parent it shows the status line, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date.
+- `index.ts` is the extension. In the parent it shows one row per child, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date.
 - `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
+- `widget.ts` reads each child's transcript for the rows: last action, tokens, cost.
 - `outbox.ts` is the way back: the child writes each turn's result to `outbox/`, and the parent extension puts it into the chat and deletes the file.
 - `launcher.ts` runs inside the tmux pane. tmux gives a new pane the tmux server's environment, so the CLI saves the caller's environment in a private `launch.json`. The launcher restores it, deletes the file, and becomes `pi`.
 - `wait` reads the child's state from `metadata.json` and its answer from `session.jsonl`, never from the terminal screen.
@@ -230,6 +236,17 @@ npm test
 ```
 
 The tests use `node --test` with no dependencies. Each test starts its own tmux server on a private socket (`TMUX_TMPDIR`) and a fake `pi` that records what it got, so they touch no real session and need no model.
+
+```sh
+npm run check:live
+```
+
+The live check starts a real parent Pi in RPC mode and a real child, with this checkout as the package. It uses a temporary agent directory that links your logins, so it touches no real run or session. It needs a model login, takes about two minutes, and costs a few cents. It fails unless:
+
+- the child's result arrives in the parent as a message, and the agent does not run `subagent wait`
+- the widget shows the busy child with its time, tool call, tokens, and cost
+- two messages that an idle child finds in the same tick both get an answer
+- a child whose process is killed is reported as `exited`, once
 
 ## Upstream
 
