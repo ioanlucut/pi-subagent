@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
-	accessSync,
-	constants,
+	copyFileSync,
 	existsSync,
 	mkdirSync,
 	readFileSync,
@@ -11,7 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const launcherPath = join(dirname(fileURLToPath(import.meta.url)), "launcher.ts");
@@ -49,7 +48,8 @@ export interface RunMetadata {
 
 export interface InboxMessage {
 	message: string;
-	delivery: "auto" | "followUp";
+	/** `interrupt`: end the current turn, like Escape in the child. */
+	delivery: "auto" | "followUp" | "interrupt";
 }
 
 interface SessionEntry {
@@ -179,8 +179,33 @@ export async function waitForRunShutdown(runDir: string, timeoutMs = 2000): Prom
 	}
 }
 
-export function removeRunDir(runDir: string): void {
+/** Where Pi keeps the sessions of `cwd`, the same path `pi --resume` reads there. */
+function sessionDirFor(cwd: string): string {
+	return join(getAgentDir(), "sessions", `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
+}
+
+/**
+ * Remove a run. A transcript with an answer is first copied into Pi's sessions for the child's working
+ * directory, named as Pi names it, so `pi --resume` there lists it. Returns that path.
+ */
+export function removeRunDir(runDir: string): string | undefined {
+	let kept: string | undefined;
+	const metadata = readMetadata(runDir);
+	try {
+		const [header] = readFileSync(metadata?.sessionFile ?? "", "utf8").split("\n", 1);
+		const session = JSON.parse(header) as { type?: unknown; id?: unknown; timestamp?: unknown; cwd?: unknown };
+		if (metadata && readLatestAssistant(metadata.sessionFile) && session.type === "session" && typeof session.id === "string" && typeof session.cwd === "string" && typeof session.timestamp === "string") {
+			const dir = sessionDirFor(session.cwd);
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+			const target = join(dir, `${session.timestamp.replace(/[:.]/g, "-")}_${session.id}.jsonl`);
+			copyFileSync(metadata.sessionFile, target);
+			kept = target;
+		}
+	} catch {
+		// No transcript or no header: nothing to keep.
+	}
 	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	return kept;
 }
 
 export function tmuxSessionExists(session: string): boolean {
@@ -203,14 +228,8 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 
 /** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
 export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
-	let launcher = "pi";
-	const testLauncher = join(metadata.cwd, "pi-test.sh");
-	try {
-		accessSync(testLauncher, constants.X_OK);
-		launcher = testLauncher;
-	} catch {
-		// Use the installed pi executable.
-	}
+	// A file in the working directory must not choose the program: a cloned repository could.
+	const launcher = process.env.PI_SUBAGENT_PI || "pi";
 	const launchFile = writeLaunchFile(
 		metadata.runDir,
 		{ ...process.env, PWD: metadata.cwd, PI_SUBAGENT_RUN_DIR: metadata.runDir },
@@ -361,6 +380,25 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 /** Suspend running children whose parent process died without its shutdown handler (crash, kill -9, lost terminal). */
 export async function suspendOrphanedRuns(): Promise<void> {
 	await suspendRuns(listRuns().filter((run) => parentIsGone(run) && tmuxSessionExists(run.tmuxSession)));
+	endSessionsWithoutRun();
+}
+
+/**
+ * End child tmux sessions of this agent dir whose run directory is gone, for example after a crash
+ * between `stop` and the tmux kill. Nothing can send to, wait for, or stop such a child.
+ */
+function endSessionsWithoutRun(): void {
+	const list = spawnSync("tmux", ["list-panes", "-a", "-F", "#{session_name}\t#{pane_start_command}"], { encoding: "utf8" });
+	if (list.status !== 0) return;
+	const runsDir = getRunsDir();
+	for (const line of list.stdout.split("\n")) {
+		const [session, command = ""] = line.split("\t");
+		if (!/^pi-subagent-[a-z0-9]+$/.test(session)) continue;
+		// The last argument of the pane command is the launch file in the run directory. Another agent dir: not ours.
+		const runDir = dirname(command.trim().split(/\s+/).at(-1) ?? "");
+		if (dirname(runDir) !== runsDir || existsSync(runDir)) continue;
+		spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
+	}
 }
 
 function parentIsGone(run: RunMetadata): boolean {

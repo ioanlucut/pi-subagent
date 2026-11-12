@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import type { RunMetadata, RunState } from "./shared.ts";
-import { ActivityTracker, widgetLines, type RunActivity } from "./widget.ts";
+import { ActivityTracker, displayWidth, widgetLines, type RunActivity } from "./widget.ts";
 
 let dir: string;
 let sessionFile: string;
@@ -109,4 +109,22 @@ test("the state decides the icon color, and more than five children are counted"
 	assert.equal(lines[5], "<dim>+2 more · /subagent to attach</>");
 	assert.match(widgetLines([row("a", "busy")], theme, 40, 0)[0], /^<warning>⟳<\/>/);
 	assert.deepEqual(widgetLines([], theme, 40, 0), []);
+});
+
+test("display width counts wide characters and emoji as two columns, and the row icons as one", () => {
+	assert.equal(displayWidth("ab"), 2);
+	assert.equal(displayWidth("レビュー"), 8);
+	assert.equal(displayWidth("🚀"), 2);
+	assert.equal(displayWidth("⟳◌✓✗■…↓"), 7);
+});
+
+test("a row with wide characters is as wide as any other row", () => {
+	const lines = widgetLines(
+		[row("aaa111", "busy", { last: "bash echo 日本語のテキスト 🚀🚀🚀 and more text" }, "レビュー"), row("bbb222", "idle", { last: "ok" }, "ascii")],
+		plain,
+		50,
+		0,
+	);
+
+	assert.deepEqual(lines.map(displayWidth), [50, 50]);
 });

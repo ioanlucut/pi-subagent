@@ -16,14 +16,19 @@ beforeEach(() => {
 
 afterEach(() => rmSync(runDir, { recursive: true, force: true }));
 
-function queue(name: string, message: string, delivery: "auto" | "followUp" = "auto"): void {
+function queue(name: string, message: string, delivery: "auto" | "followUp" | "interrupt" = "auto"): void {
 	writeFileSync(join(inboxDir(runDir), `${name}.json`), JSON.stringify({ message, delivery }));
 }
 
 /** A fake child: records each message with its delivery mode. */
 function child(idle: boolean) {
 	const sent: string[] = [];
-	return { sent, isIdle: () => idle, send: (message: string, deliverAs?: string) => void sent.push(`${deliverAs ?? "prompt"}:${message}`) };
+	return {
+		sent,
+		isIdle: () => idle,
+		send: (message: string, deliverAs?: string) => void sent.push(`${deliverAs ?? "prompt"}:${message}`),
+		abort: () => void sent.push("abort"),
+	};
 }
 
 const pending = () => readdirSync(inboxDir(runDir)).sort();
@@ -82,5 +87,18 @@ test("a broken inbox file is removed and reported, and later messages still arri
 	new InboxDelivery(runDir).deliver(idle);
 
 	assert.deepEqual(idle.sent, ["prompt:second"]);
+	assert.deepEqual(pending(), []);
+});
+
+test("an interrupt ends a busy child's turn, and does nothing to an idle child", () => {
+	queue("1", "", "interrupt");
+	const busy = child(false);
+	new InboxDelivery(runDir).deliver(busy);
+	assert.deepEqual(busy.sent, ["abort"]);
+
+	queue("2", "", "interrupt");
+	const idle = child(true);
+	new InboxDelivery(runDir).deliver(idle);
+	assert.deepEqual(idle.sent, []);
 	assert.deepEqual(pending(), []);
 });

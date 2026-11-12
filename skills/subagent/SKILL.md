@@ -94,6 +94,12 @@ subagent send <handle> "message"
 
 # Busy: waits until current work finishes, then starts another turn.
 subagent send <handle> --follow-up "message"
+
+# Busy: ends the current turn, like Escape. The child stays, ready for `send`.
+subagent interrupt <handle>
+
+# Prints the state and latest answer, without waiting. Use it for a result that was cut.
+subagent last <handle>
 ```
 
 Names are 1–64 characters and need not be unique. Messages use the subagent extension's control inbox; do not use `tmux send-keys`.
@@ -104,6 +110,6 @@ Names are 1–64 characters and need not be unique. Messages use the subagent ex
 subagent stop <handle>
 ```
 
-Explicitly stop every subagent when it is no longer needed; do not leave completed subagents running idle. This terminates tmux and removes the run transcript and metadata. Keep an idle subagent alive only when concrete follow-up work is expected, then stop it afterward.
+Explicitly stop every subagent when it is no longer needed; do not leave completed subagents running idle. This terminates tmux and removes its metadata. `stop` prints where the transcript went: cite that path when the user may want to read what the child did. Keep an idle subagent alive only when concrete follow-up work is expected, then stop it afterward.
 
 The interactive `/subagent` command lists active subagents spawned by the current Pi session. Selecting one suspends the current Pi TUI and attaches to its tmux session; detaching returns to the parent Pi. When the parent already runs inside tmux, selection switches the current tmux client instead.

@@ -119,10 +119,32 @@ function formatDuration(ms: number): string {
 	return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-// shortcut: counts UTF-16 units, not terminal columns, so a wide character (CJK, emoji) makes a row
-// too long and Pi wraps it; use pi-tui's `truncateToWidth` if that shows up.
-const cut = (text: string, width: number): string =>
-	text.length <= width ? text : width <= 0 ? "" : `${text.slice(0, width - 1)}…`;
+// Wide East Asian characters and emoji take two terminal columns; combining marks and joiners none.
+const WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}/u;
+const ZERO = /[\p{Mn}\p{Me}\u200B-\u200F\uFE00-\uFE0F]/u;
+const charWidth = (char: string): number => (ZERO.test(char) ? 0 : WIDE.test(char) ? 2 : 1);
+
+/** Terminal columns that `text` takes. */
+export function displayWidth(text: string): number {
+	let width = 0;
+	for (const char of text) width += charWidth(char);
+	return width;
+}
+
+/** `text` in at most `width` columns, with `…` when cut. */
+function cut(text: string, width: number): string {
+	if (displayWidth(text) <= width) return text;
+	let out = "";
+	let used = 0;
+	for (const char of text) {
+		if (used + charWidth(char) > width - 1) break;
+		out += char;
+		used += charWidth(char);
+	}
+	return width <= 0 ? "" : `${out}…`;
+}
+
+const pad = (text: string, width: number): string => text + " ".repeat(Math.max(0, width - displayWidth(text)));
 
 /**
  * The parent's subagent widget: one row per child with its state, name, time in the current turn,
@@ -131,15 +153,15 @@ const cut = (text: string, width: number): string =>
 export function widgetLines(rows: WidgetRow[], theme: WidgetTheme, width: number, now = Date.now()): string[] {
 	const paint = (color: Color, text: string): string => (text ? theme.fg(color, text) : "");
 	const shown = rows.slice(0, MAX_ROWS);
-	const nameWidth = Math.min(MAX_NAME, Math.max(0, ...shown.map(({ run }) => (run.name ?? run.handle).length)));
+	const nameWidth = Math.min(MAX_NAME, Math.max(0, ...shown.map(({ run }) => displayWidth(run.name ?? run.handle))));
 	const lines = shown.map(({ run, state, activity }) => {
 		const [icon, color] = ICONS[state];
-		const name = cut(run.name ?? run.handle, nameWidth).padEnd(nameWidth);
+		const name = pad(cut(run.name ?? run.handle, nameWidth), nameWidth);
 		const time = state === "busy" && activity.turnStartedAt !== undefined ? formatDuration(now - activity.turnStartedAt) : "";
 		const totals = `↓${formatCount(activity.outputTokens)} $${activity.cost.toFixed(2)}`;
-		const room = Math.max(0, width - (2 + nameWidth + 2 + TIME_WIDTH + 2) - 1 - totals.length);
+		const room = Math.max(0, width - (2 + nameWidth + 2 + TIME_WIDTH + 2) - 1 - displayWidth(totals));
 		const detail = cut(state === "starting" ? "starting" : state === "error" ? (run.error ?? "failed") : (activity.last ?? ""), room);
-		return `${theme.fg(color, icon)} ${name}  ${paint("dim", time)}${" ".repeat(TIME_WIDTH - time.length)}  ${paint("muted", detail)}${" ".repeat(room - detail.length)} ${paint("dim", totals)}`;
+		return `${theme.fg(color, icon)} ${name}  ${paint("dim", time)}${" ".repeat(TIME_WIDTH - time.length)}  ${paint("muted", detail)}${" ".repeat(room - displayWidth(detail))} ${paint("dim", totals)}`;
 	});
 	if (rows.length > shown.length) lines.push(theme.fg("dim", cut(`+${rows.length - shown.length} more · /subagent to attach`, width)));
 	return lines;
