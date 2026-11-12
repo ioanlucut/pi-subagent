@@ -237,6 +237,17 @@ npm test
 
 The tests use `node --test` with no dependencies. Each test starts its own tmux server on a private socket (`TMUX_TMPDIR`) and a fake `pi` that records what it got, so they touch no real session and need no model.
 
+```sh
+npm run check:live
+```
+
+The live check starts a real parent Pi in RPC mode and a real child, with this checkout as the package. It uses a temporary agent directory that links your logins, so it touches no real run or session. It needs a model login, takes about two minutes, and costs a few cents. It fails unless:
+
+- the child's result arrives in the parent as a message, and the agent does not run `subagent wait`
+- the widget shows the busy child with its time, tool call, tokens, and cost
+- two messages that an idle child finds in the same tick both get an answer
+- a child whose process is killed is reported as `exited`, once
+
 ## Upstream
 
 ```sh

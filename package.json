@@ -5,7 +5,8 @@
   "keywords": ["pi-package"],
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "check:live": "node live-check.ts"
   },
   "bin": {
     "subagent": "./subagent.ts"
