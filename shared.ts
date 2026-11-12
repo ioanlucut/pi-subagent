@@ -90,6 +90,23 @@ export function claimRunDir(): string | undefined {
 	return processState.piSubagentRunDir;
 }
 
+/**
+ * A timer callback that cannot end Pi: an error thrown in a timer is an uncaught exception, and Pi
+ * exits on one. The error is logged once; the next tick runs again.
+ */
+export function guarded(name: string, callback: () => void): () => void {
+	let reported = false;
+	return () => {
+		try {
+			callback();
+		} catch (error) {
+			if (reported) return;
+			reported = true;
+			console.error(`pi-subagent: ${name} failed, retrying each tick: ${error instanceof Error ? error.stack : String(error)}`);
+		}
+	};
+}
+
 export function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }

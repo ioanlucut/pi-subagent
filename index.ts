@@ -8,6 +8,7 @@ import { InboxDelivery } from "./inbox.ts";
 import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
+	guarded,
 	effectiveRunState,
 	processStartTime,
 	listRuns,
@@ -130,7 +131,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 		const activity = new ActivityTracker();
 
-		const refreshWidget = (): void => {
+		const refreshWidget = guarded("widget", (): void => {
 			if (!widgetContext) return;
 			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
 				.map((run) => ({ run, state: effectiveRunState(run) }))
@@ -151,13 +152,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				),
 				{ placement: "belowEditor" },
 			);
-		};
+		});
 
 		let resultsTimer: ReturnType<typeof setInterval> | undefined;
 		let resultsContext: ExtensionContext | undefined;
 
 		/** Put the results of this session's children into the chat, so the agent does not block on `wait`. */
-		const deliverResults = (): void => {
+		const deliverResults = guarded("result delivery", (): void => {
 			const ctx = resultsContext;
 			if (!ctx) return;
 			// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
@@ -172,7 +173,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 			for (const file of pending.files) rmSync(file, { force: true });
-		};
+		});
 
 		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
 		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
@@ -238,7 +239,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	const inbox = new InboxDelivery(runDir);
 
-	const processInbox = (): void => {
+	const processInbox = guarded("inbox", (): void => {
 		const ctx = currentContext;
 		if (!ctx) return;
 		syncSessionName();
@@ -247,7 +248,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			send: (message, deliverAs) => pi.sendUserMessage(message, deliverAs && { deliverAs }),
 			abort: () => ctx.abort(),
 		});
-	};
+	});
 
 	pi.on("session_start", (_event, ctx) => {
 		currentContext = ctx;

@@ -95,8 +95,8 @@ export interface WidgetTheme {
 
 const MAX_ROWS = 5;
 const MAX_NAME = 24;
-/** The longest duration text, `59m59s`-style: `1h05m`. */
-const TIME_WIDTH = 5;
+/** The longest duration text: `59m59s`, `10h00m`. */
+const TIME_WIDTH = 6;
 const ICONS: Record<RunState, [icon: string, color: Color]> = {
 	starting: ["◌", "muted"],
 	busy: ["⟳", "warning"],
@@ -161,7 +161,7 @@ export function widgetLines(rows: WidgetRow[], theme: WidgetTheme, width: number
 		const totals = `↓${formatCount(activity.outputTokens)} $${activity.cost.toFixed(2)}`;
 		const room = Math.max(0, width - (2 + nameWidth + 2 + TIME_WIDTH + 2) - 1 - displayWidth(totals));
 		const detail = cut(state === "starting" ? "starting" : state === "error" ? (run.error ?? "failed") : (activity.last ?? ""), room);
-		return `${theme.fg(color, icon)} ${name}  ${paint("dim", time)}${" ".repeat(TIME_WIDTH - time.length)}  ${paint("muted", detail)}${" ".repeat(room - displayWidth(detail))} ${paint("dim", totals)}`;
+		return `${theme.fg(color, icon)} ${name}  ${paint("dim", time)}${" ".repeat(Math.max(0, TIME_WIDTH - time.length))}  ${paint("muted", detail)}${" ".repeat(Math.max(0, room - displayWidth(detail)))} ${paint("dim", totals)}`;
 	});
 	if (rows.length > shown.length) lines.push(theme.fg("dim", cut(`+${rows.length - shown.length} more · /subagent to attach`, width)));
 	return lines;
