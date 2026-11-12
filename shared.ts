@@ -71,6 +71,25 @@ interface AssistantEntry extends SessionEntry {
 	message: AssistantMessage;
 }
 
+/** Survives `/reload`, which loads this module again in the same process. */
+const processState = globalThis as { piSubagentRunDir?: string };
+
+/**
+ * The run this process is the child of. The child takes PI_SUBAGENT_RUN_DIR out of its environment, so a
+ * Pi that its tools start (a test, a script) does not act as the child: read its inbox, rewrite its
+ * metadata, mark it exited. Such a process inherits PI_SUBAGENT_NESTED, which turns the extension and
+ * `spawn` off.
+ */
+export function claimRunDir(): string | undefined {
+	const inherited = process.env.PI_SUBAGENT_RUN_DIR;
+	if (inherited) {
+		processState.piSubagentRunDir = inherited;
+		delete process.env.PI_SUBAGENT_RUN_DIR;
+		process.env.PI_SUBAGENT_NESTED = "1";
+	}
+	return processState.piSubagentRunDir;
+}
+
 export function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 }

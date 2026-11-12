@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import {
+	claimRunDir,
 	effectiveRunState,
 	inboxDir,
 	processStartTime,
@@ -36,7 +37,9 @@ function displayState(metadata: RunMetadata): string {
 }
 
 export default function subagentExtension(pi: ExtensionAPI) {
-	const runDir = process.env.PI_SUBAGENT_RUN_DIR;
+	const runDir = claimRunDir();
+	// A Pi started from a child's tools: neither a parent nor that child.
+	if (!runDir && process.env.PI_SUBAGENT_NESTED) return;
 	if (!runDir) {
 		pi.on("resources_discover", () => ({ skillPaths: [join(packageDir, "skills")] }));
 	}
