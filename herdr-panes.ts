@@ -23,7 +23,8 @@ const CHILD_STATUS = "bg=#6d28d9,fg=#ffffff,bold";
 /** The pane command: style the child's tmux session, then watch it read-only until it ends. */
 export function watchCommand(run: RunMetadata): string {
 	const session = run.tmuxSession;
-	const label = ` SUBAGENT ${run.name ?? run.handle} · read-only · closes when done `;
+	// `##`: tmux expands `#(command)` and `#{format}` in the status line, and a name is free text.
+	const label = ` SUBAGENT ${(run.name ?? run.handle).replaceAll("#", "##")} · read-only · closes when done `;
 	return [
 		`exec tmux set-option -t ${session} status-style '${CHILD_STATUS}'`,
 		`set-option -t ${session} status-left-length 120`,

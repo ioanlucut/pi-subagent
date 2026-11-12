@@ -183,6 +183,7 @@ If the `--cwd` directory has an executable `pi-test.sh`, the child runs it in pl
 | The parent dies without quitting                                       | The next Pi to start, in any session, suspends them.                                                                                    |
 | The parent session starts again (`pi --resume`, `pi --session <file>`) | Suspended children start again, idle, with their full history.                                                                          |
 | `subagent stop`                                                        | Removed for good: tmux session, transcript, metadata.                                                                                   |
+| A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed for good.                                                        |
 
 A suspended child shows as `exited`, is hidden from the status line and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents.
 

@@ -15,6 +15,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import {
 	listRuns,
 	processStartTime,
+	pruneStaleRuns,
 	readMetadata,
 	resumeSuspendedRuns,
 	suspendOrphanedRuns,
@@ -34,6 +35,8 @@ beforeEach(() => {
 	process.env.TMUX_TMPDIR = join(root, "tmux");
 	mkdirSync(process.env.TMUX_TMPDIR);
 	delete process.env.TMUX;
+	// The caller's own NODE_OPTIONS would reach the child and hide what the tests check.
+	delete process.env.NODE_OPTIONS;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
@@ -326,4 +329,35 @@ test("wait reports a completed turn as finished", () => {
 	const result = runCli(["wait", handle], {});
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal(result.stdout, "abc123 finished\n\nAll good.\n");
+});
+
+/** A run directory with no live child, last updated `ageDays` ago. */
+function storedRun(handle: string, ageDays: number, tmuxSession = `pi-subagent-${handle}`): string {
+	const runDir = join(agentDir(), "subagents", handle);
+	mkdirSync(runDir, { recursive: true });
+	const updatedAt = new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000).toISOString();
+	writeFileSync(
+		join(runDir, "metadata.json"),
+		JSON.stringify({ version: 1, handle, tmuxSession, runDir, sessionFile: join(runDir, "session.jsonl"), state: "exited", suspended: true, createdAt: updatedAt, updatedAt }),
+	);
+	return runDir;
+}
+
+test("pruneStaleRuns removes runs with no live child that are older than 14 days", () => {
+	const stale = storedRun("old111", 15);
+	const recent = storedRun("new222", 13);
+
+	pruneStaleRuns();
+
+	assert.equal(existsSync(stale), false);
+	assert.equal(existsSync(recent), true);
+});
+
+test("pruneStaleRuns keeps an old run whose child still runs", () => {
+	startTmuxServer({ PATH: basePath });
+	const live = storedRun("old333", 30, "server");
+
+	pruneStaleRuns();
+
+	assert.equal(existsSync(live), true);
 });
