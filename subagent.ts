@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
 import {
 	assistantText,
 	effectiveRunState,
 	getRunsDir,
 	inboxDir,
+	inboxHasMessages,
 	launchRun,
 	listRuns,
 	readLatestAssistant,
@@ -20,6 +22,7 @@ import {
 	type InboxMessage,
 	type RunMetadata,
 	tmuxSessionExists,
+	turnOutcome,
 	updateMetadata,
 	waitForRunShutdown,
 	writeMetadata,
@@ -202,7 +205,12 @@ function spawnSubagent(args: string[]): void {
 		throw error;
 	}
 
-	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n`);
+	// The parent Pi sets PI_SUBAGENT_NOTIFY when it delivers results; without a parent session nobody gets them.
+	const result =
+		process.env.PI_SUBAGENT_NOTIFY === "1" && metadata.parentSessionId
+			? "Result: arrives as a message when the turn ends. Do not run `subagent wait`.\n"
+			: "";
+	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n${result}`);
 }
 
 function statusSubagent(args: string[]): void {
@@ -267,19 +275,18 @@ async function waitSubagent(args: string[]): Promise<void> {
 
 	while (Date.now() < deadline) {
 		const metadata = getRun(handle);
-		const pending = existsSync(inboxDir(metadata.runDir))
-			? readdirSync(inboxDir(metadata.runDir)).some((file) => file.endsWith(".json"))
-			: false;
+		markWaiting(metadata.runDir);
+		const pending = inboxHasMessages(metadata.runDir);
 		const state = effectiveRunState(metadata);
 		if (state === "error") fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
 		if (metadata.hasStarted && state === "idle" && !pending) {
 			const message = readLatestAssistant(metadata.sessionFile);
 			if (!message) fail(`${handle} finished without an assistant response`);
-			const failed = message.stopReason === "error" || message.stopReason === "aborted";
-			const outcome = failed ? `failed (${message.stopReason})` : "finished";
+			const outcome = turnOutcome(message);
 			process.stdout.write(`${handle} ${outcome}\n\n${assistantText(message)}\n`);
-			if (failed) process.exitCode = 1;
+			if (outcome !== "finished") process.exitCode = 1;
+			clearResults(metadata.runDir);
 			return;
 		}
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
@@ -291,6 +298,7 @@ async function stopSubagent(args: string[]): Promise<void> {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	const wasRunning = tmuxSessionExists(metadata.tmuxSession);
+	markExitKnown(metadata.runDir);
 	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
 	removeRunDir(metadata.runDir);

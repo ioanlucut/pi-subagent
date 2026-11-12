@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { pendingResults, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
 	listRuns,
@@ -38,6 +39,8 @@ beforeEach(() => {
 	delete process.env.TMUX;
 	// The caller's own NODE_OPTIONS would reach the child and hide what the tests check.
 	delete process.env.NODE_OPTIONS;
+	// Set when the tests run from a Pi that delivers results; each test chooses it for itself.
+	delete process.env.PI_SUBAGENT_NOTIFY;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
@@ -314,7 +317,7 @@ function idleRun(message: Record<string, unknown>): string {
 	writeFileSync(sessionFile, `${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", ...message } })}\n`);
 	writeFileSync(
 		join(runDir, "metadata.json"),
-		JSON.stringify({ version: 1, handle, tmuxSession: "server", runDir, sessionFile, state: "idle", hasStarted: true }),
+		JSON.stringify({ version: 1, handle, tmuxSession: "server", runDir, sessionFile, parentSessionId: "parent", state: "idle", hasStarted: true }),
 	);
 	return handle;
 }
@@ -383,4 +386,25 @@ test("a child claims its run for its own process: a Pi started from its tools ha
 		delete process.env.PI_SUBAGENT_RUN_DIR;
 		delete process.env.PI_SUBAGENT_NESTED;
 	}
+});
+
+test("wait takes the result with it, so the parent is not told a second time", () => {
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	const [run] = listRuns();
+	reportSettledTurn(run.runDir);
+	assert.equal(pendingResults([run])?.files.length, 1);
+
+	const result = runCli(["wait", handle], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(pendingResults([run]), undefined);
+});
+
+test("spawn tells the agent not to wait only when the parent delivers results", () => {
+	const bin = fakePi(join(root, "bin"));
+	const quiet = runCli(["spawn", "--cwd", root, "--prompt", "hi"], spawnEnv(agentDir(), bin));
+	const notified = runCli(["spawn", "--cwd", root, "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), PI_SUBAGENT_NOTIFY: "1", PI_SESSION_ID: "parent" });
+
+	assert.doesNotMatch(quiet.stdout, /Result:/);
+	assert.match(notified.stdout, /\nResult: arrives as a message when the turn ends\. Do not run `subagent wait`\.\n$/);
 });

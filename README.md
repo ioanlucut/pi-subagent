@@ -69,6 +69,20 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 
 A status line below the Pi editor shows each child's name and state (`busy`, `idle`, `error`).
 
+### Results arrive as messages
+
+In the TUI and in RPC mode, the parent agent does not block on `wait`. Each time a child ends a turn, its answer arrives in the parent chat as a message:
+
+```text
+Subagent review-spec (a1b2c3) finished
+
+<the child's answer>
+```
+
+The first line ends with `finished`, `failed (error)`, `failed (aborted)`, or `exited` (the process ended and nobody stopped it). An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
+
+Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print and JSON modes end with the turn, so there the agent uses `wait`.
+
 ### Watch children in Herdr
 
 When the parent Pi runs in [Herdr](https://github.com/herdrdev/herdr), each working child opens in a pane in the same tab, beside the parent pane. The first child pane goes on the right of the parent; more children stack below it. Each pane:
@@ -194,6 +208,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
    │                                            metadata.json   state, model, parent
    │                                            session.jsonl   the child's transcript
    │                                            inbox/          messages from `send`
+   │                                            outbox/         results for the parent
    │
    └─ extension: status line, /subagent,       tmux session pi-subagent-<handle>
       suspend and resume                         └─ launcher.ts ─► pi (the child)
@@ -202,6 +217,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
 - `index.ts` is the extension. In the parent it shows the status line, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date.
 - `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
+- `outbox.ts` is the way back: the child writes each turn's result to `outbox/`, and the parent extension puts it into the chat and deletes the file.
 - `launcher.ts` runs inside the tmux pane. tmux gives a new pane the tmux server's environment, so the CLI saves the caller's environment in a private `launch.json`. The launcher restores it, deletes the file, and becomes `pi`.
 - `wait` reads the child's state from `metadata.json` and its answer from `session.jsonl`, never from the terminal screen.
 
