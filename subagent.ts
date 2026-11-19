@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
 import {
 	assistantText,
+	getAgentDir,
 	effectiveRunState,
 	getRunsDir,
 	inboxDir,
@@ -30,6 +31,25 @@ import {
 
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
+const GUARD = "cc-safety-net";
+
+/**
+ * The command guard as `pi install npm:cc-safety-net` installs it. A light child loads it unless the list
+ * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: nothing to load.
+ */
+function guardExtension(): string[] {
+	const path = join(getAgentDir(), "npm", "node_modules", GUARD);
+	return existsSync(path) ? [path] : [];
+}
+
+/** Pi flags for a light child: this extension, the guard, then the listed ones. A local path is resolved here, not in `--cwd`. */
+function lightExtensionArgs(list: string): string[] {
+	const names = list.split(",").map((name) => name.trim()).filter(Boolean);
+	if (names.length === 0) fail("--extensions requires at least one extension");
+	const guard = names.includes(`-${GUARD}`) ? [] : guardExtension();
+	const listed = names.filter((name) => name !== `-${GUARD}`).map((name) => (/^[a-z]+:/.test(name) ? name : resolve(name)));
+	return ["--no-extensions", ...[extensionPath, ...guard, ...listed].flatMap((path) => ["--extension", path])];
+}
 
 function fail(message: string): never {
 	throw new Error(message);
@@ -38,7 +58,7 @@ function fail(message: string): never {
 function usage(): never {
 	fail(`Usage:
   subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
-    [--cwd <dir>] [--tools <names>] [--no-extensions] [--no-skills]
+    [--cwd <dir>] [--tools <names>] [--no-extensions | --extensions <list>] [--no-mcp] [--no-skills]
     [--no-prompt-templates] [--no-context-files] (--prompt <text> | --file <path>)...
   subagent status <handle>
   subagent rename <handle> <name>
@@ -91,6 +111,8 @@ function spawnSubagent(args: string[]): void {
 	let cwd = process.cwd();
 	let tools: string | undefined;
 	let noExtensions = false;
+	let extensions: string | undefined;
+	let noMcp = false;
 	let noSkills = false;
 	let noPromptTemplates = false;
 	let noContextFiles = false;
@@ -127,6 +149,13 @@ function spawnSubagent(args: string[]): void {
 			case "--no-extensions":
 				noExtensions = true;
 				break;
+			case "--extensions":
+				extensions = valueAfter(args, i, arg);
+				i++;
+				break;
+			case "--no-mcp":
+				noMcp = true;
+				break;
 			case "--no-skills":
 				noSkills = true;
 				break;
@@ -157,6 +186,8 @@ function spawnSubagent(args: string[]): void {
 	if (!VALID_THINKING_LEVELS.has(thinking)) fail(`Invalid thinking level: ${thinking}`);
 	if (tools !== undefined && !tools.split(",").some((name) => name.trim()))
 		fail("--tools requires at least one tool name");
+	if (noExtensions && extensions !== undefined) fail("Use --no-extensions or --extensions, not both");
+	const lightArgs = extensions === undefined ? [] : lightExtensionArgs(extensions);
 	if (prompts.length === 0 && files.length === 0) fail("spawn requires at least one --prompt or --file");
 	if (!existsSync(cwd)) fail(`Working directory not found: ${cwd}`);
 
@@ -170,6 +201,8 @@ function spawnSubagent(args: string[]): void {
 	const launchArgs: string[] = [];
 	if (tools) launchArgs.push("--tools", tools);
 	if (noExtensions) launchArgs.push("--no-extensions", "--extension", extensionPath);
+	launchArgs.push(...lightArgs);
+	if (noMcp) launchArgs.push("--no-mcp");
 	if (noSkills) launchArgs.push("--no-skills");
 	if (noPromptTemplates) launchArgs.push("--no-prompt-templates");
 	if (noContextFiles) launchArgs.push("--no-context-files");
