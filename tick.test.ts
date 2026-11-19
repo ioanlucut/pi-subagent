@@ -18,9 +18,11 @@ beforeEach(() => {
 	root = mkdtempSync(join(tmpdir(), "psa-tick-"));
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 	mkdirSync(join(root, "bin"));
-	writeFileSync(join(root, "bin", "tmux"), `#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\nexit 1\n`, { mode: 0o755 });
+	// `new-session` succeeds, so a queued run starts; `has-session` fails, as for a child that has not run yet.
+	writeFileSync(join(root, "bin", "tmux"), `#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\n[ "$1" = new-session ]\n`, { mode: 0o755 });
 	path = process.env.PATH;
 	process.env.PATH = `${join(root, "bin")}:${path}`;
+	process.env.PI_SUBAGENT_LIMIT = "1";
 	mock.timers.enable({ apis: ["setInterval"] });
 });
 
@@ -28,6 +30,7 @@ afterEach(() => {
 	for (const tick of ticks.splice(0)) tick.stop();
 	mock.timers.reset();
 	process.env.PATH = path;
+	delete process.env.PI_SUBAGENT_LIMIT;
 	for (const child of children.splice(0)) child.kill("SIGKILL");
 	rmSync(root, { recursive: true, force: true });
 });
@@ -50,6 +53,7 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 		runDir,
 		sessionFile: join(runDir, "session.jsonl"),
 		parentSessionId: "parent",
+		cwd: root,
 		state: "busy",
 		hasStarted: true,
 		childPid: child.pid,
@@ -61,6 +65,15 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 	writeMetadata(run);
 	return { run, child };
 }
+
+/** A run that waits for a free slot; it has no process yet. */
+function queuedRun(handle: string): RunMetadata {
+	const { run, child } = liveRun(handle, { state: "queued", childPid: undefined, childStarted: undefined });
+	child.kill("SIGKILL");
+	return run;
+}
+
+const started = () => tmuxCalls().filter((call) => call.startsWith("new-session")).map((call) => call.split(" ")[3]);
 
 /** A parent's tick that records what it shows and what it sends. */
 function parentTick(ready = () => true) {
@@ -154,6 +167,33 @@ test("a child past its time limit is stopped by the tick and reported as timed o
 
 	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
 	assert.match(sent.join(), /^Subagent aaa111 timed out\n/);
+});
+
+test("a queued child keeps the tick, and starts when the last live child ends", async () => {
+	const { tick, shown } = parentTick();
+	const { child } = liveRun("aaa111");
+	queuedRun("bbb222");
+	tick.wake();
+
+	mock.timers.tick(3000);
+	assert.deepEqual(started(), []);
+	assert.deepEqual(shown.at(-1), [
+		{ handle: "aaa111", state: "busy" },
+		{ handle: "bbb222", state: "queued" },
+	]);
+
+	await kill(child);
+	mock.timers.tick(1000);
+	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+});
+
+test("a queued child alone starts on wake", () => {
+	const { tick } = parentTick(() => false);
+	queuedRun("bbb222");
+
+	tick.wake();
+
+	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
 });
 
 test("wake while the tick runs starts no second timer", () => {

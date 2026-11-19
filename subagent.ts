@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { findAgent, listAgents } from "./agents.ts";
 import { clearResults, markExitKnown, markWaiting, stopTimedOutRuns, timedOutText } from "./outbox.ts";
 import {
 	assistantText,
@@ -16,6 +17,8 @@ import {
 	inboxHasMessages,
 	launchRun,
 	listRuns,
+	mustQueue,
+	prepareLaunch,
 	parseDuration,
 	readLatestAssistant,
 	readMetadata,
@@ -24,6 +27,7 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
+	runLimit,
 	tmuxSessionExists,
 	turnOutcome,
 	updateMetadata,
@@ -59,7 +63,7 @@ function fail(message: string): never {
 
 function usage(): never {
 	fail(`Usage:
-  subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
+  subagent spawn [--agent <name>] [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
     [--cwd <dir>] [--worktree <topic> [--base <branch>]] [--tools <names>]
     [--no-extensions | --extensions <list>] [--no-mcp] [--no-skills]
     [--no-prompt-templates] [--no-context-files] [--timeout <duration>]
@@ -71,7 +75,8 @@ function usage(): never {
   subagent last <handle>
   subagent interrupt <handle>
   subagent stop <handle>
-  subagent list`);
+  subagent list
+  subagent agents`);
 }
 
 function valueAfter(args: string[], index: number, option: string): string {
@@ -137,8 +142,28 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 	return path;
 }
 
-function spawnSubagent(args: string[]): void {
+/**
+ * The role's flags go first, so a flag the caller gives wins. The caller's `--no-extensions` or
+ * `--extensions` replaces the role's extensions instead of clashing with them.
+ */
+function applyAgent(args: string[]): { args: string[]; instructions?: string } {
+	const index = args.indexOf("--agent");
+	if (index === -1) return { args };
+	const name = valueAfter(args, index, "--agent");
+	const agent = findAgent(process.cwd(), name);
+	if (!agent) {
+		const known = listAgents(process.cwd()).map((each) => each.name);
+		fail(`Unknown agent: ${name} (known: ${known.length ? known.join(", ") : "none"}; see \`subagent agents\`)`);
+	}
+	const rest = args.filter((_arg, i) => i !== index && i !== index + 1);
+	const ownExtensions = rest.includes("--no-extensions") || rest.includes("--extensions");
+	const roleArgs = agent.spawnArgs.filter((arg, i, all) => !ownExtensions || (arg !== "--extensions" && all[i - 1] !== "--extensions"));
+	return { args: [...roleArgs, ...rest], instructions: agent.body || undefined };
+}
+
+function spawnSubagent(callerArgs: string[]): void {
 	if (process.env.PI_SUBAGENT_RUN_DIR || process.env.PI_SUBAGENT_NESTED) fail("Nested subagents are disabled");
+	const { args, instructions } = applyAgent(callerArgs);
 	let name: string | undefined;
 	let provider = process.env.PI_PROVIDER;
 	let model = process.env.PI_MODEL;
@@ -260,12 +285,15 @@ function spawnSubagent(args: string[]): void {
 	if (noPromptTemplates) launchArgs.push("--no-prompt-templates");
 	if (noContextFiles) launchArgs.push("--no-context-files");
 
+	const parentSessionId = process.env.PI_SESSION_ID || undefined;
+	// Only a parent Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
+	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && parentSessionId !== undefined && mustQueue(listRuns(parentSessionId));
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
 		handle,
 		name,
-		parentSessionId: process.env.PI_SESSION_ID || undefined,
+		parentSessionId,
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
@@ -278,7 +306,7 @@ function spawnSubagent(args: string[]): void {
 		thinking,
 		launchArgs,
 		timeout,
-		state: "starting",
+		state: queued ? "queued" : "starting",
 		hasStarted: false,
 		createdAt: now,
 		updatedAt: now,
@@ -286,9 +314,12 @@ function spawnSubagent(args: string[]): void {
 	writeMetadata(metadata);
 
 	const initialArgs = files.map((file) => `@${file}`);
-	if (prompts.length > 0) initialArgs.push(`Task:\n${prompts.join("\n\n")}`);
+	const task = prompts.length > 0 ? `Task:\n${prompts.join("\n\n")}` : undefined;
+	const firstPrompt = [instructions, task].filter(Boolean).join("\n\n");
+	if (firstPrompt) initialArgs.push(firstPrompt);
 	try {
-		launchRun(metadata, initialArgs);
+		if (queued) prepareLaunch(metadata, initialArgs);
+		else launchRun(metadata, initialArgs);
 	} catch (error) {
 		removeRunDir(runDir);
 		throw error;
@@ -301,7 +332,7 @@ function spawnSubagent(args: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 
@@ -430,6 +461,16 @@ function interruptSubagent(args: string[]): void {
 	process.stdout.write(`Interrupting ${runDisplayName(metadata)}. Its turn ends as failed (aborted).\n`);
 }
 
+function listAgentFiles(args: string[]): void {
+	if (args.length !== 0) usage();
+	const agents = listAgents(process.cwd());
+	if (agents.length === 0) {
+		process.stdout.write("No agents. Add one in .pi/agents/<name>.md or ~/.pi/agent/agents/<name>.md\n");
+		return;
+	}
+	for (const agent of agents) process.stdout.write(`${agent.name}  ${agent.description ?? ""}`.trimEnd() + "\n");
+}
+
 function listSubagents(args: string[]): void {
 	if (args.length !== 0) usage();
 	const runs = listRuns(process.env.PI_SESSION_ID || undefined);
@@ -474,6 +515,9 @@ async function main(): Promise<void> {
 			break;
 		case "list":
 			listSubagents(args);
+			break;
+		case "agents":
+			listAgentFiles(args);
 			break;
 		default:
 			usage();

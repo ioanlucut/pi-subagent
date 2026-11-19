@@ -57,7 +57,7 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 
 | Command                                                          | Effect                                                                                                                                                                          |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child. Prints its handle and the tmux attach command.                                                                                                                   |
+| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child, or queue it past the limit (see below). Prints its handle and the tmux attach command.                                                                          |
 | `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).                                                                                                |
 | `subagent status <handle>`                                       | One child's state and model.                                                                                                                                                    |
 | `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. A child past its `spawn --timeout` is stopped and prints `<handle> timed out`, exit 1. |
@@ -66,7 +66,8 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
 | `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
-| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle.                                                                                                                                                      |
+| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts.                                                                                                          |
+| `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
@@ -75,6 +76,10 @@ Below the Pi editor, each child has one row: its state, name, time in the curren
 ⟳ review-spec  1m05s  bash npm test               ↓12k $0.42
 ✓ standards           No findings.                ↓900 $0.02
 ```
+
+### At most 4 children run at once
+
+In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. Set `PI_SUBAGENT_LIMIT` before you start Pi to change the limit. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
 
 ### Results arrive as messages
 
@@ -104,6 +109,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 
 | Option                                 | Default                                              | Use                                                                                   |
 | -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `--agent <name>`                       | none                                                 | Apply an agent file, see Agent files. The other flags override it.                    |
 | `--name <name>`                        | the handle                                           | Label in the UI, 1 to 64 characters.                                                  |
 | `--provider`, `--model`                | the parent's                                         | Pick another model. Required for independent opinions.                                |
 | `--thinking <level>`                   | the parent's, else `medium`                          | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.                            |
@@ -119,6 +125,37 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
 | `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch. Past it, the child is stopped and reported as `timed out`; its run and transcript stay. |
+
+## Agent files
+
+An agent file holds a role, so each `spawn` does not repeat its settings. `subagent spawn --agent implementer` reads `implementer.md` from `.pi/agents/` in the current directory, then from `~/.pi/agent/agents/`. A project file overrides a global file with the same name. An unknown name fails and starts nothing.
+
+```markdown
+---
+name: implementer
+description: Implements one ticket in its worktree
+model: anthropic/claude-opus-5-5
+thinking: high
+tools: read, bash, edit, write
+extensions: npm:pi-web-access, ./my-extension.ts
+mcp: false
+---
+Load the tdd skill. Commit with a conventional message.
+```
+
+| Field         | Same as                                                                       |
+| ------------- | ----------------------------------------------------------------------------- |
+| `name`        | `--agent <name>`. Default: the file name without `.md`.                       |
+| `description` | The text `subagent agents` shows.                                             |
+| `model`       | `--provider` and `--model` for `provider/model`, else `--model`.              |
+| `thinking`    | `--thinking`                                                                  |
+| `tools`       | `--tools`                                                                     |
+| `extensions`  | `--extensions`. A relative path is relative to the agent file.                |
+| `mcp`         | `false` is `--no-mcp`.                                                        |
+| `timeout`     | `--timeout`                                                                   |
+| body          | Added to the child's first prompt, before the `--prompt` text.                |
+
+Flags on `spawn` override the file: `--agent implementer --model x` uses model `x`. `--extensions` or `--no-extensions` replaces the file's extensions.
 
 ## Recipes
 
@@ -237,7 +274,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
 - `index.ts` is the extension. In the parent it shows one row per child, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date, with the child's process ID and start time.
-- `tick.ts` is the parent's one tick for the rows, the Herdr panes, and the results. It runs each second only while the session has a child or a result to send; it starts again when a tool call (`subagent spawn`) ends. A session with no children does no subagent work.
+- `tick.ts` is the parent's one tick for the rows, the Herdr panes, the results, the time limits, and the queue. It runs each second only while the session has a child (queued ones included) or a result to send; it starts again when a tool call (`subagent spawn`) ends. A session with no children does no subagent work.
 - Each second the parent checks whether each child runs from that process ID (`kill(pid, 0)`), with no program started; `ps` checks the start time once per child, so a reused ID does not count. On a busy macOS any program start can take a second, and these checks run on Pi's UI thread. A run from before this change, with no process ID, still asks tmux.
 - `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
 - `widget.ts` reads each child's transcript for the rows: last action, tokens, cost.

@@ -25,6 +25,7 @@ import {
 	readMetadata,
 	removeRunDir,
 	resumeSuspendedRuns,
+	startQueuedRuns,
 	suspendOrphanedRuns,
 	suspendRuns,
 	tmuxSessionExists,
@@ -47,6 +48,8 @@ beforeEach(() => {
 	delete process.env.NODE_OPTIONS;
 	// Set when the tests run from a Pi that delivers results; each test chooses it for itself.
 	delete process.env.PI_SUBAGENT_NOTIFY;
+	delete process.env.PI_SUBAGENT_QUEUE;
+	delete process.env.PI_SUBAGENT_LIMIT;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
@@ -701,6 +704,102 @@ test("stop leaves the worktree and its branch", () => {
 	assert.ok(gitOut(repo, "rev-parse", "--verify", "refs/heads/t1"), "the branch is kept");
 });
 
+/** What a parent Pi with a tick gives the `spawn` its bash tool runs: its session, and a limit of 2. */
+const queueEnv = { PI_SESSION_ID: "parent", PI_SUBAGENT_QUEUE: "1", PI_SUBAGENT_LIMIT: "2" };
+
+/** Spawn `count` children; returns each `spawn`'s output. */
+function spawnMany(count: number, env: NodeJS.ProcessEnv): string[] {
+	const bin = fakePi(join(root, "bin"));
+	return Array.from({ length: count }, (_, i) => {
+		const result = runCli(["spawn", "--name", `c${i}`, "--cwd", root, "--prompt", `task ${i}`], { ...spawnEnv(agentDir(), bin), ...env });
+		assert.equal(result.status, 0, result.stderr);
+		return result.stdout;
+	});
+}
+
+const byName = (name: string) => listRuns().find((run) => run.name === name)!;
+
+/** Wait until the fake `pi` of `run` has written what it got. */
+async function startedChild(run: { runDir: string }): Promise<string> {
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		if (existsSync(join(run.runDir, "probe"))) return readFileSync(join(run.runDir, "probe"), "utf8");
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+	}
+	assert.fail(`${run.runDir} did not start`);
+}
+
+/** The parent tick, in a Pi started with a limit of 2. */
+const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => startQueuedRuns("parent", (_run, error) => assert.fail(error)));
+
+test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () => {
+	const outputs = spawnMany(3, queueEnv);
+
+	assert.deepEqual(listRuns().map((run) => [run.name, run.state]), [["c0", "starting"], ["c1", "starting"], ["c2", "queued"]]);
+	assert.equal(tmuxSessionExists(byName("c2").tmuxSession), false);
+	assert.match(outputs[2], /^Spawned c2 \(\w+\)\nState: queued, starts when fewer than 2 children run\n/);
+	await tick();
+	assert.equal(byName("c2").state, "queued", "no slot is free");
+});
+
+test("when a child ends, the next tick starts the queued child with the caller's environment and its prompt", async () => {
+	spawnMany(3, { ...queueEnv, AWS_PROFILE: "caller" });
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+
+	await tick();
+
+	const queued = byName("c2");
+	assert.equal(queued.state, "starting");
+	assert.equal(tmuxSessionExists(queued.tmuxSession), true);
+	assert.match(await startedChild(queued), /^AWS_PROFILE=caller$/m);
+	assert.equal(JSON.parse(readFileSync(join(queued.runDir, "argv"), "utf8")).at(-1), "Task:\ntask 2");
+});
+
+test("list and status show a queued child as queued", () => {
+	spawnMany(3, queueEnv);
+
+	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c2 \(\w+\)  queued  /m);
+	assert.match(runCli(["status", byName("c2").handle], {}).stdout, /^c2 \(\w+\): queued /);
+});
+
+test("stop removes a queued child, and it never starts", async () => {
+	spawnMany(3, queueEnv);
+	const queued = byName("c2");
+
+	const result = runCli(["stop", queued.handle], {});
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(existsSync(queued.runDir), false);
+	assert.equal(tmuxSessionExists(queued.tmuxSession), false);
+});
+
+test("a queued child's time limit counts from its start, not from its spawn", async () => {
+	spawnMany(2, queueEnv);
+	const bin = fakePi(join(root, "bin"));
+	assert.equal(runCli(["spawn", "--name", "late", "--cwd", root, "--timeout", "1s", "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), ...queueEnv }).status, 0);
+	await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+
+	stopTimedOutRuns(listRuns("parent"));
+	assert.equal(byName("late").timedOut, undefined, "a queued child is not stopped");
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+
+	const started = byName("late");
+	assert.equal(started.state, "starting");
+	assert.ok(Date.parse(started.deadline!) > Date.now(), "the limit starts with the child");
+});
+
+test("a spawn with no parent tick starts each child at once, past the limit", () => {
+	spawnMany(3, { ...queueEnv, PI_SUBAGENT_QUEUE: "" });
+
+	for (const run of listRuns()) {
+		assert.equal(run.state, "starting");
+		assert.equal(tmuxSessionExists(run.tmuxSession), true);
+	}
+});
+
 test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {
 	const logged: string[] = [];
 	const error = console.error;
@@ -764,4 +863,95 @@ test("spawn rejects a time limit that is not a duration", () => {
 	assert.equal(result.status, 1);
 	assert.match(result.stderr, /--timeout must be a duration such as 90s, 10m, or 1h/);
 	assert.deepEqual(listRuns(), []);
+});
+
+/** Write the agent file `<dir>/<name>.md` with `frontmatter` lines and `body`. */
+function agentFile(dir: string, name: string, frontmatter: string[], body = ""): void {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\n${frontmatter.join("\n")}\n---\n${body}`);
+}
+
+/** The value after `flag` in the child's arguments. */
+function flagValue(args: string[], flag: string): string | undefined {
+	const index = args.indexOf(flag);
+	return index === -1 ? undefined : args[index + 1];
+}
+
+test("spawn --agent starts the child with the agent file's model, thinking, tools, extensions, and instructions", async () => {
+	const guard = installGuard();
+	agentFile(join(agentDir(), "agents"), "implementer", ["description: Implements one ticket", "model: anthropic/claude-x", "thinking: high", "tools: read,bash", "extensions: /ext/a.ts", "mcp: false"], "Follow the brief.\n");
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "implementer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.equal(flagValue(args, "--provider"), "anthropic");
+	assert.equal(flagValue(args, "--model"), "claude-x");
+	assert.equal(flagValue(args, "--thinking"), "high");
+	assert.equal(flagValue(args, "--tools"), "read,bash");
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
+	assert.ok(args.includes("--no-mcp"));
+	assert.equal(args.at(-1), "Follow the brief.\n\nTask:\nhi");
+});
+
+test("a flag on spawn overrides the agent file", async () => {
+	agentFile(join(agentDir(), "agents"), "implementer", ["model: anthropic/claude-x", "thinking: high"]);
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "implementer", "--model", "x", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.equal(flagValue(args, "--model"), "x");
+	assert.equal(flagValue(args, "--thinking"), "high");
+});
+
+test("spawn --agent takes the agent file's time limit, and --timeout on spawn overrides it", () => {
+	agentFile(join(agentDir(), "agents"), "implementer", ["timeout: 10m"]);
+	const env = spawnEnv(agentDir(), fakePi(join(root, "bin")));
+
+	const fromFile = runCli(["spawn", "--cwd", root, "--name", "file", "--agent", "implementer", "--prompt", "hi"], env);
+	const fromFlag = runCli(["spawn", "--cwd", root, "--name", "flag", "--agent", "implementer", "--timeout", "90s", "--prompt", "hi"], env);
+
+	assert.equal(fromFile.status, 0, fromFile.stderr);
+	assert.equal(fromFlag.status, 0, fromFlag.stderr);
+	const timeouts = Object.fromEntries(listRuns().map((run) => [run.name, run.timeout]));
+	assert.deepEqual(timeouts, { file: "10m", flag: "90s" });
+});
+
+/** `runCli` from the directory `cwd`, as a parent Pi working in a project runs it. */
+function runCliIn(cwd: string, args: string[], env: NodeJS.ProcessEnv) {
+	return spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
+}
+
+test("a project agent file overrides a global one with the same name", async () => {
+	const project = join(root, "project");
+	agentFile(join(agentDir(), "agents"), "implementer", ["model: global-model"]);
+	agentFile(join(project, ".pi", "agents"), "implementer", ["model: project-model"]);
+
+	const result = runCliIn(project, ["spawn", "--agent", "implementer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(flagValue(await childArgs(agentDir()), "--model"), "project-model");
+});
+
+test("agents lists the name and description of each agent, a project one in place of a global one", () => {
+	const project = join(root, "project");
+	agentFile(join(agentDir(), "agents"), "reviewer", ["description: Reviews a change"]);
+	agentFile(join(agentDir(), "agents"), "implementer", ["description: Global implementer"]);
+	agentFile(join(project, ".pi", "agents"), "implementer", ["description: Implements one ticket"]);
+
+	const result = runCliIn(project, ["agents"], { PI_CODING_AGENT_DIR: agentDir() });
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "implementer  Implements one ticket\nreviewer  Reviews a change\n");
+});
+
+test("spawn --agent with an unknown name fails and starts nothing", () => {
+	agentFile(join(agentDir(), "agents"), "implementer", []);
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "nope", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 1);
+	assert.equal(result.stderr, "Unknown agent: nope (known: implementer; see `subagent agents`)\n");
+	assert.equal(existsSync(getRunsDir()), false);
 });

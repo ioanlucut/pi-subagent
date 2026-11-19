@@ -17,6 +17,8 @@ subagent spawn --name implementation --prompt "Complete task"
 
 By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment. Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
 
+When a role fits, use an agent file: run `subagent agents` to list them, then `subagent spawn --agent <name> --prompt "..."`. The file sets model, thinking, tools, extensions, MCP, time limit, and instructions; a flag you also give overrides it. An unknown name fails and starts nothing.
+
 `--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
 Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, the child is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run.
@@ -57,7 +59,7 @@ Three additional built-in tools are available but off by default:
 - `--no-prompt-templates` - Disable prompt-template commands. Usually unnecessary, but useful when testing a minimal child environment.
 - `--no-context-files` - Ignore repository instruction files such as `AGENTS.md` and `CLAUDE.md`. Use only when those instructions would bias an independent investigation. Do not use for implementation unless intentionally bypassing repository guidance.
 
-Spawn prints a random handle and the exact tmux attach command. Keep the handle for later commands. Subagents persist after their current turn completes: `wait`, completion, and becoming idle do not terminate them. They survive `/reload`. When the spawning Pi session quits or is replaced, or its process dies, they are suspended and relaunched idle with their history when that session is resumed. They are only removed by `subagent stop`.
+Spawn prints a random handle and the exact tmux attach command. Past the parallel limit, spawn prints `State: queued`: the child starts by itself when a slot is free. Do not stop or spawn it again; a running child frees its slot only when it is stopped, so stop children you are done with. Keep the handle for later commands. Subagents persist after their current turn completes: `wait`, completion, and becoming idle do not terminate them. They survive `/reload`. When the spawning Pi session quits or is replaced, or its process dies, they are suspended and relaunched idle with their history when that session is resumed. They are only removed by `subagent stop`.
 
 ## Get the result
 

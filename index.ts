@@ -44,7 +44,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.registerCommand("subagent", {
 		description: "Select and attach to a subagent spawned by this session",
 		handler: async (_args, ctx) => {
-			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => effectiveRunState(run) !== "exited");
+			// A queued child has no tmux session to attach to yet.
+			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => !["exited", "queued"].includes(effectiveRunState(run)));
 			if (runs.length === 0) {
 				ctx.ui.notify("No active subagents spawned by this session", "info");
 				return;
@@ -164,6 +165,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			});
 
 			const delivers = claimResultDelivery(ctx.mode);
+			// `spawn` from this Pi's bash tool queues past the limit only when a tick here starts queued runs.
+			process.env.PI_SUBAGENT_QUEUE = delivers || ctx.hasUI ? "1" : "0";
 			if (!delivers && !ctx.hasUI) return;
 			tick = new SessionTick({
 				sessionId: () => ctx.sessionManager.getSessionId(),
@@ -180,6 +183,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 								),
 						}
 					: undefined,
+				onStartError: (run, message) => {
+					if (ctx.hasUI) ctx.ui.notify(`Could not start subagent ${runDisplayName(run)}: ${message}`, "error");
+				},
 			});
 			tick.wake();
 		});
@@ -194,11 +200,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			panes?.closeAll();
 			if (event.reason === "reload") return;
 			// Suspend running children: stop the process but keep transcript and metadata so resuming this
-			// session relaunches them. Children that already exited on their own are discarded.
+			// session relaunches them. Children that already exited on their own are discarded; queued ones wait.
 			const running: RunMetadata[] = [];
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 				if (tmuxSessionExists(run.tmuxSession)) running.push(run);
-				else if (!run.suspended) removeRunDir(run.runDir);
+				else if (!run.suspended && run.state !== "queued") removeRunDir(run.runDir);
 			}
 			await suspendRuns(running);
 		});
