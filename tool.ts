@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "subagent.ts");
 
-export const TOOL_ACTIONS = ["spawn", "list", "status", "wait", "send", "stop", "last", "agents"] as const;
+export const TOOL_ACTIONS = ["spawn", "list", "status", "wait", "send", "stop", "resume", "last", "agents"] as const;
 
 export interface SubagentToolParams {
 	action: (typeof TOOL_ACTIONS)[number];

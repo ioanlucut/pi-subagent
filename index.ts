@@ -45,11 +45,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			name: "subagent",
 			label: "Subagent",
 			description:
-				"Delegate work to a separate Pi in its own tmux session, as the `subagent` CLI does: spawn, list, status, wait, send, stop, last, agents. Prints what the matching CLI command prints. Load the `subagent` skill for when and how to use each action.",
+				"Delegate work to a separate Pi in its own tmux session, as the `subagent` CLI does: spawn, list, status, wait, send, stop, resume, last, agents. Prints what the matching CLI command prints. Load the `subagent` skill for when and how to use each action.",
 			promptSnippet: "Spawn and talk to Pi subagents (same actions as the subagent CLI)",
 			parameters: Type.Object({
 				action: StringEnum(TOOL_ACTIONS),
-				handle: Type.Optional(Type.String({ description: "status, wait, send, stop, last: the child's handle" })),
+				handle: Type.Optional(Type.String({ description: "status, wait, send, stop, resume, last: the child's handle" })),
 				message: Type.Optional(Type.String({ description: "send: the message" })),
 				followUp: Type.Optional(Type.Boolean({ description: "send: queue after the current work (--follow-up)" })),
 				name: Type.Optional(Type.String({ description: "spawn: short name shown in the UI" })),

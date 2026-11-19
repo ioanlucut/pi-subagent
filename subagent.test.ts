@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
-import { runSubagentTool } from "./tool.ts";
+import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -915,6 +915,20 @@ test("subagent resume queues a suspended child, and it starts when a slot is fre
 	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
 	await tick();
 	assert.equal(byName("old").state, "starting");
+	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
+});
+
+test("the subagent tool resumes a suspended child, as the CLI does", async () => {
+	assert.ok((TOOL_ACTIONS as readonly string[]).includes("resume"), "the model can choose the action");
+	const handle = await oldSuspendedChild();
+
+	let result = { text: "", isError: true };
+	await withEnv({ PATH: `${join(root, "bin")}:${basePath}` }, async () => {
+		result = await runSubagentTool({ action: "resume", handle }, toolContext("parent"));
+	});
+
+	assert.equal(result.isError, false, result.text);
+	assert.match(result.text, /^Resumed old \(\w+\)\nState: busy\n/);
 	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
 });
 
