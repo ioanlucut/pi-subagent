@@ -12,7 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
 import { runSubagentTool } from "./tool.ts";
@@ -529,6 +529,20 @@ test("stop prints where the transcript went", () => {
 
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /^Stopped tra333\nTranscript: .*--repo-my-app--\/2026-11-12T10-00-00-123Z_child-session\.jsonl \(`pi --resume` in \/repo\/my-app\)\n$/);
+});
+
+test("after stop, the answer file named in the parent's message still exists, beside the kept transcript", () => {
+	const runDir = transcriptRun("tra444", "/repo/my-app");
+	updateMetadata(runDir, { parentSessionId: "parent" });
+	reportSettledTurn(runDir);
+	const [run] = listRuns("parent");
+	const file = /\[The whole answer: (\S+)\]$/.exec(pendingResults([run])?.text ?? "")?.[1];
+
+	const result = runCli(["stop", "tra444"], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(file, join(agentDir(), "sessions", "--repo-my-app--", "2026-11-12T10-00-00-123Z_child-session.answers", basename(file ?? "")));
+	assert.equal(readFileSync(file ?? "", "utf8"), "Done.");
 });
 
 test("last prints the latest answer and the state, without waiting", () => {

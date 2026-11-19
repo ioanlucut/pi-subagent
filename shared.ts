@@ -226,24 +226,29 @@ function sessionDirFor(cwd: string): string {
 }
 
 /**
- * Remove a run. A transcript with an answer is first copied into Pi's sessions for the child's working
- * directory, named as Pi names it, so `pi --resume` there lists it. Returns that path.
+ * Where a transcript is kept when its run is removed: Pi's sessions for the child's working directory, named
+ * as Pi names it, so `pi --resume` there lists it. Undefined when the transcript has no session header yet.
  */
+export function keptTranscriptPath(sessionFile: string): string | undefined {
+	try {
+		const [header] = readFileSync(sessionFile, "utf8").split("\n", 1);
+		const session = JSON.parse(header) as { type?: unknown; id?: unknown; timestamp?: unknown; cwd?: unknown };
+		if (session.type !== "session" || typeof session.id !== "string" || typeof session.cwd !== "string" || typeof session.timestamp !== "string") return undefined;
+		return join(sessionDirFor(session.cwd), `${session.timestamp.replace(/[:.]/g, "-")}_${session.id}.jsonl`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Remove a run. A transcript with an answer is first copied to `keptTranscriptPath`. Returns that path. */
 export function removeRunDir(runDir: string): string | undefined {
 	let kept: string | undefined;
 	const metadata = readMetadata(runDir);
-	try {
-		const [header] = readFileSync(metadata?.sessionFile ?? "", "utf8").split("\n", 1);
-		const session = JSON.parse(header) as { type?: unknown; id?: unknown; timestamp?: unknown; cwd?: unknown };
-		if (metadata && readLatestAssistant(metadata.sessionFile) && session.type === "session" && typeof session.id === "string" && typeof session.cwd === "string" && typeof session.timestamp === "string") {
-			const dir = sessionDirFor(session.cwd);
-			mkdirSync(dir, { recursive: true, mode: 0o700 });
-			const target = join(dir, `${session.timestamp.replace(/[:.]/g, "-")}_${session.id}.jsonl`);
-			copyFileSync(metadata.sessionFile, target);
-			kept = target;
-		}
-	} catch {
-		// No transcript or no header: nothing to keep.
+	const target = metadata && keptTranscriptPath(metadata.sessionFile);
+	if (metadata && target && readLatestAssistant(metadata.sessionFile)) {
+		mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+		copyFileSync(metadata.sessionFile, target);
+		kept = target;
 	}
 	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	return kept;

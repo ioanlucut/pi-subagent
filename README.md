@@ -94,7 +94,7 @@ Subagent review-spec (a1b2c3) finished
 <the child's answer>
 ```
 
-The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). An answer longer than 2,000 characters arrives as its first 2,000 characters and the path of a file in the run directory that holds it whole; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
+The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). Each answer ends with the path of a file that holds it whole, beside the place `stop` keeps the transcript (`<time>_<id>.answers/` in Pi's sessions), so the path stays valid after `stop`. An answer longer than 2,000 characters arrives as its first 2,000 characters and that path; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
 
 Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print and JSON modes end with the turn, so there the agent uses `wait`.
 
@@ -269,7 +269,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
    │                                            session.jsonl   the child's transcript
    │                                            inbox/          messages from `send`
    │                                            outbox/         results for the parent
-   │                                            answers/        long answers, whole
+   │                                            answers/        answers, before the transcript has a header
    │
    └─ extension: child rows, /subagent,        tmux session pi-subagent-<handle>
       suspend and resume                         └─ launcher.ts ─► pi (the child)

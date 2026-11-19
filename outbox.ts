@@ -6,6 +6,7 @@ import {
 	effectiveRunState,
 	inboxHasMessages,
 	inStartingGrace,
+	keptTranscriptPath,
 	readLatestAssistant,
 	readMetadata,
 	runDisplayName,
@@ -49,19 +50,23 @@ function writeResult(run: RunMetadata, outcome: string, body: string): void {
 }
 
 /**
- * Save a long answer in the run directory and return its start with the path. One file per turn: an older
- * message keeps pointing at its own answer. Never creates the run directory: `stop` may have removed it.
+ * Save the answer and return the text the parent gets: a long answer as its start, each with the path of the
+ * whole. The file sits beside the place the transcript is kept on `stop`, so the path stays valid after it;
+ * one file per turn, so an older message keeps pointing at its own answer.
  */
 function summarize(run: RunMetadata, text: string): string {
-	if (text.length <= SUMMARY_CHARS) return text;
-	const dir = answersDir(run.runDir);
+	const kept = keptTranscriptPath(run.sessionFile);
+	// No session header yet: the run directory, as nothing else names the transcript.
+	const dir = kept ? kept.replace(/\.jsonl$/, ".answers") : answersDir(run.runDir);
 	const file = join(dir, `${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
 	try {
-		if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
+		// The run directory is never created again: `stop` may have removed it.
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: Boolean(kept), mode: 0o700 });
 		writeFileSync(file, text, { mode: 0o600 });
 	} catch {
 		return text; // The run is gone; writeResult drops the message too.
 	}
+	if (text.length <= SUMMARY_CHARS) return `${text}\n\n[The whole answer: ${file}]`;
 	return `${text.slice(0, SUMMARY_CHARS)}\n\n[First ${SUMMARY_CHARS} of ${text.length} characters. The whole answer: ${file}]`;
 }
 
