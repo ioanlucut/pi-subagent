@@ -60,14 +60,14 @@ afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-/** Write an executable `pi` that records what it received, then stays alive like a real child. */
+/** Write an executable `pi` that records what it received and, like a real child, its process ID, then stays alive. */
 function fakePi(dir: string): string {
 	mkdirSync(dir, { recursive: true });
 	const script = join(dir, "pi");
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst metadata = join(process.env.PI_SUBAGENT_RUN_DIR, "metadata.json");\nfs.writeFileSync(metadata + ".pi", JSON.stringify({ ...JSON.parse(fs.readFileSync(metadata, "utf8")), childPid: process.pid }));\nfs.renameSync(metadata + ".pi", metadata);\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;

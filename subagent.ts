@@ -300,6 +300,7 @@ function spawnSubagent(callerArgs: string[]): void {
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
+		childPid: null,
 		tmuxSession,
 		runDir,
 		sessionFile,

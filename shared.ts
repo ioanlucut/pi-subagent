@@ -29,8 +29,11 @@ export interface RunMetadata {
 	/** Start time of the parent pi (`ps -o lstart`), so a reused process ID does not count as the parent. */
 	parentStarted?: string;
 	childSessionId?: string;
-	/** Process ID of the child pi, written by the child when its session starts. */
-	childPid?: number;
+	/**
+	 * Process ID of the child pi, written by the child when its session starts. `null` until then; a run
+	 * with no field at all is from a version before this one, and only tmux knows whether it runs.
+	 */
+	childPid?: number | null;
 	/** Start time of the child pi (`ps -o lstart`), so a reused process ID does not count as the child. */
 	childStarted?: string;
 	tmuxSession: string;
@@ -334,6 +337,14 @@ export function startLaunch(metadata: RunMetadata): void {
 	}
 }
 
+/** tmux starts just after the metadata is written; a run this young whose child has not recorded its ID has not died. */
+export const STARTING_GRACE_MS = 30_000;
+
+/** Whether a `starting` run is still in its grace time, so a child with no process ID yet is not dead. */
+export function inStartingGrace(metadata: RunMetadata): boolean {
+	return metadata.state === "starting" && Date.now() - Date.parse(metadata.updatedAt) < STARTING_GRACE_MS;
+}
+
 /** Verdicts on (process ID, start time) pairs, so `ps` runs once per child and not on each tick. */
 const checkedChildren = new Map<string, boolean>();
 
@@ -341,11 +352,13 @@ const checkedChildren = new Map<string, boolean>();
  * Whether the run's child process runs, with no program started in the normal case: the widget and
  * result ticks call this each second on Pi's UI thread, where one `tmux` call can take 2 s on a busy
  * machine. A process ID can be reused, so the start time is checked once with `ps`; an ID once found
- * dead stays dead. Runs from before the child recorded its process ID still ask tmux.
+ * dead stays dead. A child that has not recorded its ID yet lives while it is in its grace time. Only a
+ * run from an older version, with no `childPid` field, asks tmux.
  */
 function childIsAlive(metadata: RunMetadata): boolean {
 	const pid = metadata.childPid;
 	if (pid === undefined) return tmuxSessionExists(metadata.tmuxSession);
+	if (pid === null) return inStartingGrace(metadata);
 	const key = `${pid} ${metadata.childStarted}`;
 	if (checkedChildren.get(key) === false || !processExists(pid)) {
 		checkedChildren.set(key, false);
@@ -451,7 +464,9 @@ export function assistantText(message: AssistantMessage): string {
 /** Stop running children but keep transcript and metadata, so resuming the parent session relaunches them. */
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	for (const run of runs) {
-		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString() });
+		// A child that has not recorded its process ID never writes `exited`: the parent marks it, so it is not alive in its grace time.
+		const unstarted = readMetadata(run.runDir)?.childPid === null;
+		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString(), ...(unstarted && { state: "exited" as const }) });
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
@@ -572,8 +587,8 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 			...patch,
 			state: "queued",
 			error: undefined,
-			// The old process is gone; until the new one records its ID, tmux tells whether it runs.
-			childPid: undefined,
+			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
+			childPid: null,
 			childStarted: undefined,
 		}) ?? run;
 	prepareLaunch(queued);

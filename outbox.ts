@@ -5,6 +5,7 @@ import {
 	assistantText,
 	effectiveRunState,
 	inboxHasMessages,
+	inStartingGrace,
 	readLatestAssistant,
 	readMetadata,
 	runDisplayName,
@@ -13,8 +14,6 @@ import {
 	updateMetadata,
 } from "./shared.ts";
 
-/** tmux starts just after the metadata is written; a run this young with no tmux session has not died. */
-const STARTING_GRACE_MS = 30_000;
 /** A longer answer reaches the parent as its start and the path of the whole, so results do not fill the parent's context. */
 const SUMMARY_CHARS = 2_000;
 /** `wait` renews its claim each 500 ms; an older claim is from a `wait` that was killed. */
@@ -95,7 +94,7 @@ export function reportExitedRuns(runs: RunMetadata[]): boolean {
 	let waiting = false;
 	for (const run of runs) {
 		if (run.suspended || existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) !== "exited") continue;
-		if (run.state === "starting" && Date.now() - Date.parse(run.updatedAt) < STARTING_GRACE_MS) {
+		if (inStartingGrace(run)) {
 			waiting = true;
 			continue;
 		}
