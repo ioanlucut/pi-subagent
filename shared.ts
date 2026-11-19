@@ -50,6 +50,8 @@ export interface RunMetadata {
 	timedOut?: boolean;
 	/** Set by the parent when it stops the child on quit or session switch; the child is relaunched on resume. */
 	suspended?: boolean;
+	/** When the parent suspended the child; resume leaves a child suspended longer than a day. */
+	suspendedAt?: string;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -295,7 +297,7 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 }
 
 /** Start the tmux session of a run whose launch `prepareLaunch` saved. */
-function startLaunch(metadata: RunMetadata): void {
+export function startLaunch(metadata: RunMetadata): void {
 	// The limit counts from each launch, so a resumed or queued child is not stopped for the time it did not run.
 	// Written before tmux starts the child, which writes this file too.
 	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
@@ -449,7 +451,7 @@ export function assistantText(message: AssistantMessage): string {
 /** Stop running children but keep transcript and metadata, so resuming the parent session relaunches them. */
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	for (const run of runs) {
-		updateMetadata(run.runDir, { suspended: true });
+		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString() });
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
@@ -558,30 +560,40 @@ export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, m
 	}
 }
 
-/** Relaunch the session's children that were suspended. `onError` gets each run that could not start. */
+const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Put a suspended run in the queue, with the caller's environment for its launch. It stays `suspended`
+ * until its child starts, so a launch that fails is tried again on the next resume.
+ */
+export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata {
+	const queued =
+		updateMetadata(run.runDir, {
+			...patch,
+			state: "queued",
+			error: undefined,
+			// The old process is gone; until the new one records its ID, tmux tells whether it runs.
+			childPid: undefined,
+			childStarted: undefined,
+		}) ?? run;
+	prepareLaunch(queued);
+	return queued;
+}
+
+/**
+ * Queue the session's children suspended in the last 24 h, then start as many as the limit allows: resuming
+ * a session with 6 children must not start 6 Pi at once. Older ones stay suspended; `subagent resume` starts
+ * one by hand. `onError` gets each run that could not start.
+ */
 export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
 	for (const run of listRuns(sessionId)) {
-		if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
+		if (!run.suspended || run.state === "queued" || tmuxSessionExists(run.tmuxSession)) continue;
 		if (!existsSync(run.sessionFile)) {
 			removeRunDir(run.runDir);
 			continue;
 		}
-		const starting =
-			updateMetadata(run.runDir, {
-				state: "starting",
-				error: undefined,
-				// The old process is gone; until the new one records its ID, tmux tells whether it runs.
-				childPid: undefined,
-				childStarted: undefined,
-				parentPid: process.pid,
-				parentStarted: processStartTime(process.pid),
-			}) ?? run;
-		try {
-			launchRun(starting);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateMetadata(run.runDir, { state: "error", error: message });
-			onError(run, message);
-		}
+		if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) > RESUME_WINDOW_MS) continue;
+		queueSuspendedRun(run);
 	}
+	startQueuedRuns(sessionId, onError);
 }
