@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
 import {
@@ -38,7 +39,7 @@ function fail(message: string): never {
 function usage(): never {
 	fail(`Usage:
   subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
-    [--cwd <dir>] [--tools <names>] [--no-extensions] [--no-skills]
+    [--cwd <dir>] [--worktree <topic> [--base <branch>]] [--tools <names>] [--no-extensions] [--no-skills]
     [--no-prompt-templates] [--no-context-files] (--prompt <text> | --file <path>)...
   subagent status <handle>
   subagent rename <handle> <name>
@@ -82,6 +83,37 @@ function generateHandle(): string {
 	fail("Could not allocate a unique subagent handle");
 }
 
+function git(cwd: string, args: string[]): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	if (result.status !== 0) fail(`git ${args.join(" ")} failed in ${cwd}: ${(result.stderr || String(result.error)).trim()}`);
+	return result.stdout.trim();
+}
+
+/**
+ * The worktree `~/WORK/dev/.worktrees/<repo>/<topic>` on branch `<topic>`, made from `base`.
+ * An existing path is reused only when it is a clean worktree of that branch, so no work is lost.
+ */
+function prepareWorktree(repoDir: string, topic: string, base: string | undefined): string {
+	// The topic is one path segment; `git worktree add -b` rejects what is not a valid branch name.
+	if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(topic)) fail(`Invalid worktree topic: ${topic}`);
+	// The common Git directory sits in the main checkout, so every worktree of a repository maps to one <repo>.
+	const commonDir = git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+	const path = join(homedir(), "WORK", "dev", ".worktrees", basename(dirname(commonDir)), topic);
+	if (existsSync(path)) {
+		const check = (args: string[]) => spawnSync("git", args, { cwd: path, encoding: "utf8" }).stdout?.trim();
+		const reusable =
+			check(["rev-parse", "--show-toplevel"]) === realpathSync(path) &&
+			check(["rev-parse", "--path-format=absolute", "--git-common-dir"]) === commonDir &&
+			check(["branch", "--show-current"]) === topic &&
+			check(["status", "--porcelain"]) === "";
+		if (!reusable) fail(`${path} exists and has other work; it is not a clean worktree of branch ${topic}`);
+		return path;
+	}
+	mkdirSync(dirname(path), { recursive: true });
+	git(repoDir, ["worktree", "add", "--no-track", "-b", topic, path, base ?? "HEAD"]);
+	return path;
+}
+
 function spawnSubagent(args: string[]): void {
 	if (process.env.PI_SUBAGENT_RUN_DIR || process.env.PI_SUBAGENT_NESTED) fail("Nested subagents are disabled");
 	let name: string | undefined;
@@ -89,6 +121,8 @@ function spawnSubagent(args: string[]): void {
 	let model = process.env.PI_MODEL;
 	let thinking = process.env.PI_REASONING_LEVEL || "medium";
 	let cwd = process.cwd();
+	let worktree: string | undefined;
+	let base: string | undefined;
 	let tools: string | undefined;
 	let noExtensions = false;
 	let noSkills = false;
@@ -118,6 +152,14 @@ function spawnSubagent(args: string[]): void {
 				break;
 			case "--cwd":
 				cwd = resolve(valueAfter(args, i, arg));
+				i++;
+				break;
+			case "--worktree":
+				worktree = valueAfter(args, i, arg);
+				i++;
+				break;
+			case "--base":
+				base = valueAfter(args, i, arg);
 				i++;
 				break;
 			case "--tools":
@@ -159,6 +201,8 @@ function spawnSubagent(args: string[]): void {
 		fail("--tools requires at least one tool name");
 	if (prompts.length === 0 && files.length === 0) fail("spawn requires at least one --prompt or --file");
 	if (!existsSync(cwd)) fail(`Working directory not found: ${cwd}`);
+	if (base !== undefined && worktree === undefined) fail("--base requires --worktree");
+	if (worktree !== undefined) cwd = prepareWorktree(cwd, worktree, base);
 
 	const handle = generateHandle();
 	const runDir = runDirForHandle(handle);
@@ -212,7 +256,10 @@ function spawnSubagent(args: string[]): void {
 		process.env.PI_SUBAGENT_NOTIFY === "1" && metadata.parentSessionId
 			? "Result: arrives as a message when the turn ends. Do not run `subagent wait`.\n"
 			: "";
-	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n${result}`);
+	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
+	process.stdout.write(
+		`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+	);
 }
 
 function statusSubagent(args: string[]): void {

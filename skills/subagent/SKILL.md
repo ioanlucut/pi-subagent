@@ -17,7 +17,7 @@ subagent spawn --name implementation --prompt "Complete task"
 
 By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment. Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
 
-`--cwd` defaults to the current directory. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
+`--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
 ## Tools
 
