@@ -11,6 +11,7 @@ import {
 	claimRunDir,
 	guarded,
 	effectiveRunState,
+	isLive,
 	processStartTime,
 	listRuns,
 	pruneStaleRuns,
@@ -84,7 +85,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		description: "Select and attach to a subagent spawned by this session",
 		handler: async (_args, ctx) => {
 			// A queued child has no tmux session to attach to yet.
-			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => !["exited", "queued"].includes(effectiveRunState(run)));
+			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => isLive(effectiveRunState(run)));
 			if (runs.length === 0) {
 				ctx.ui.notify("No active subagents spawned by this session", "info");
 				return;

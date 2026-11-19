@@ -378,14 +378,13 @@ function childIsAlive(metadata: RunMetadata): boolean {
 	return started === metadata.childStarted;
 }
 
+/** Whether a run in this state holds a slot: started, and not known to have ended. */
+export function isLive(state: RunState): boolean {
+	return state === "starting" || state === "busy" || state === "idle";
+}
+
 export function effectiveRunState(metadata: RunMetadata): RunState {
-	if (
-		(metadata.state === "starting" || metadata.state === "busy" || metadata.state === "idle") &&
-		!childIsAlive(metadata)
-	) {
-		return "exited";
-	}
-	return metadata.state;
+	return isLive(metadata.state) && !childIsAlive(metadata) ? "exited" : metadata.state;
 }
 
 export function listRuns(parentSessionId?: string): RunMetadata[] {

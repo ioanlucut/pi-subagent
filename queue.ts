@@ -5,6 +5,7 @@ import { isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
 	effectiveRunState,
 	getAgentDir,
+	isLive,
 	listRuns,
 	prepareLaunch,
 	processStartTime,
@@ -34,9 +35,8 @@ export function mustQueue(runs: RunMetadata[]): boolean {
 	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
 }
 
-/** Children that hold a slot: started, and their process not known to have ended. */
 function liveRunCount(runs: RunMetadata[]): number {
-	return runs.filter((run) => ["starting", "busy", "idle"].includes(effectiveRunState(run))).length;
+	return runs.filter((run) => isLive(effectiveRunState(run))).length;
 }
 
 /** The parent tick: start the session's queued runs, oldest first, while fewer than the limit run. */
