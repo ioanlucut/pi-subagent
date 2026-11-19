@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -37,7 +36,7 @@ export function claimResultDelivery(mode: string): boolean {
 }
 
 /** Queue one result for the parent. Never creates the run directory: `stop` may have removed it. */
-function writeResult(run: RunMetadata, outcome: string, body: string): void {
+export function writeResult(run: RunMetadata, outcome: string, body: string): void {
 	const dir = outboxDir(run.runDir);
 	try {
 		if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
@@ -82,6 +81,11 @@ export function reportSettledTurn(runDir: string): void {
 	writeResult(run, turnOutcome(message), summarize(run, assistantText(message)));
 }
 
+/** Whether `stop` or the parent ended the child, so its end is no news to the parent. */
+export function isExitKnown(runDir: string): boolean {
+	return existsSync(exitKnownPath(runDir));
+}
+
 /** `stop` calls this before it ends the child, so the end is not reported as a surprise. */
 export function markExitKnown(runDir: string): void {
 	try {
@@ -107,26 +111,6 @@ export function reportExitedRuns(runs: RunMetadata[]): boolean {
 		writeResult(run, "exited", "Its process ended and nobody stopped it. Spawn the task again if you still need the result.");
 	}
 	return waiting;
-}
-
-/**
- * The parent tick and `wait` call this: a child still running past its deadline is stopped and reported
- * once as `timed out`. The run directory stays, so its transcript can show where the child was stuck.
- */
-export function stopTimedOutRuns(runs: RunMetadata[]): void {
-	for (const run of runs) {
-		if (!run.deadline || run.timedOut || run.suspended || Date.now() < Date.parse(run.deadline)) continue;
-		if (existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) === "exited") continue;
-		// First, so the aborted turn and the ended process are not reported as well.
-		markExitKnown(run.runDir);
-		updateMetadata(run.runDir, { timedOut: true });
-		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
-		writeResult(run, "timed out", timedOutText(run));
-	}
-}
-
-export function timedOutText(run: RunMetadata): string {
-	return `It passed its time limit of ${run.timeout} and was stopped. Transcript: ${run.sessionFile}`;
 }
 
 /** `wait` calls this on each poll: it prints the result itself, so the parent must not get it as a message too. */

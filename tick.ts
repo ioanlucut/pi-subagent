@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
-import { pendingResults, reportExitedRuns, stopTimedOutRuns } from "./outbox.ts";
-import { effectiveRunState, guarded, listRuns, startQueuedRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { pendingResults, reportExitedRuns } from "./outbox.ts";
+import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;

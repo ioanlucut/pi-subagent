@@ -15,7 +15,6 @@ import {
 	listRuns,
 	pruneStaleRuns,
 	readMetadata,
-	resumeSuspendedRuns,
 	runDisplayName,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
@@ -24,6 +23,7 @@ import {
 	updateMetadata,
 } from "./shared.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
+import { resumeSuspendedRuns } from "./queue.ts";
 import { SessionTick } from "./tick.ts";
 import { runSubagentTool, TOOL_ACTIONS, type SubagentToolParams } from "./tool.ts";
 import { ActivityTracker, widgetLines } from "./widget.ts";

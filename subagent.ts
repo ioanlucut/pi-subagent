@@ -7,7 +7,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, markExitKnown, markWaiting, stopTimedOutRuns, timedOutText } from "./outbox.ts";
+import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
+import { mustQueue, queueSuspendedRun, runLimit, stopTimedOutRuns, timedOutText } from "./queue.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -17,10 +18,8 @@ import {
 	inboxHasMessages,
 	launchRun,
 	listRuns,
-	mustQueue,
 	prepareLaunch,
 	parseDuration,
-	queueSuspendedRun,
 	readLatestAssistant,
 	readMetadata,
 	removeRunDir,
@@ -28,7 +27,6 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
-	runLimit,
 	startLaunch,
 	tmuxSessionExists,
 	turnOutcome,

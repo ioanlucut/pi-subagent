@@ -14,7 +14,8 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
+import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { resumeSuspendedRuns, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
 import {
 	claimRunDir,
@@ -26,8 +27,6 @@ import {
 	pruneStaleRuns,
 	readMetadata,
 	removeRunDir,
-	resumeSuspendedRuns,
-	startQueuedRuns,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
 	suspendRuns,
