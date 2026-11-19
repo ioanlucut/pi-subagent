@@ -7,6 +7,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -14,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
+import { runSubagentTool } from "./tool.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -954,4 +956,90 @@ test("spawn --agent with an unknown name fails and starts nothing", () => {
 	assert.equal(result.status, 1);
 	assert.equal(result.stderr, "Unknown agent: nope (known: implementer; see `subagent agents`)\n");
 	assert.equal(existsSync(getRunsDir()), false);
+});
+
+/** What the `subagent` tool gets from Pi: the parent session, its model, and its working directory. */
+function toolContext(sessionId = "parent-session") {
+	return {
+		cwd: root,
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => join(root, "parent.jsonl") },
+		model: { provider: "test", id: "test-model" },
+		thinkingLevel: "high",
+	};
+}
+
+test("the subagent tool spawns a child of the tool's session when the subagent CLI is not on PATH", async () => {
+	const bin = fakePi(join(root, "bin"));
+	await withEnv({ ...spawnEnv(agentDir(), bin), PI_PROVIDER: "", PI_MODEL: "" }, async () => {
+		assert.equal(spawnSync("which", ["subagent"]).status, 1);
+
+		const result = await runSubagentTool({ action: "spawn", name: "tool child", prompt: "hi" }, toolContext());
+
+		assert.equal(result.isError, false, result.text);
+		assert.match(result.text, /^Spawned tool child \([a-z0-9]+\)\nState: busy\n/);
+	});
+	const args = await childArgs(agentDir());
+	assert.equal(flagValue(args, "--model"), "test-model");
+	assert.equal(flagValue(args, "--thinking"), "high");
+	assert.equal(args.at(-1), "Task:\nhi");
+	const [run] = listRuns("parent-session");
+	assert.equal(run.cwd, realpathSync(root));
+	assert.equal(run.parentSessionFile, join(root, "parent.jsonl"));
+});
+
+test("each subagent tool action prints what the matching CLI command prints", async () => {
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	agentFile(join(agentDir(), "agents"), "reviewer", ["description: Reviews a change"]);
+	const env = { PI_SESSION_ID: "parent", PI_SUBAGENT_NOTIFY: "" };
+	const both = async (params: Parameters<typeof runSubagentTool>[0], args: string[]) => {
+		const tool = await runSubagentTool(params, { ...toolContext("parent"), cwd: process.cwd() });
+		const cli = runCli(args, env);
+		return { tool, cli: { text: [cli.stdout, cli.stderr].map((part) => part.trim()).filter(Boolean).join("\n\n"), isError: cli.status !== 0 } };
+	};
+
+	for (const [params, args] of [
+		[{ action: "list" }, ["list"]],
+		[{ action: "status", handle }, ["status", handle]],
+		[{ action: "last", handle }, ["last", handle]],
+		[{ action: "agents" }, ["agents"]],
+		[{ action: "wait", handle, timeout: "5" }, ["wait", handle, "--timeout", "5"]],
+		[{ action: "send", handle, message: "more", followUp: true }, ["send", handle, "--follow-up", "more"]],
+		[{ action: "status", handle: "nope00" }, ["status", "nope00"]],
+	] as const) {
+		const { tool, cli } = await both(params, [...args]);
+		assert.deepEqual(tool, cli, params.action);
+	}
+	assert.match((await both({ action: "list" }, ["list"])).tool.text, /^abc123  idle/);
+
+	const stopped = await runSubagentTool({ action: "stop", handle }, toolContext("parent"));
+	assert.equal(stopped.isError, false, stopped.text);
+	assert.equal(stopped.text, "Stopped abc123");
+	assert.equal(listRuns("parent").length, 0);
+});
+
+test("a child spawned with the subagent tool is suspended and resumed like a CLI child", async () => {
+	const bin = fakePi(join(root, "bin"));
+	await withEnv({ ...spawnEnv(agentDir(), bin), PI_SUBAGENT_PARENT_PID: String(process.pid), PI_SUBAGENT_PARENT_STARTED: processStartTime(process.pid) }, async () => {
+		const result = await runSubagentTool({ action: "spawn", noMcp: true, prompt: "hi" }, toolContext());
+		assert.equal(result.isError, false, result.text);
+		const first = await childArgs(agentDir());
+		const [run] = listRuns("parent-session");
+		assert.equal(run.parentPid, process.pid);
+
+		await suspendRuns([run]);
+		assert.equal(readMetadata(run.runDir)?.suspended, true);
+		rmSync(join(run.runDir, "probe"));
+		resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
+
+		const relaunched = await childArgs(agentDir());
+		assert.ok(relaunched.includes("--no-mcp"));
+		assert.equal(flagValue(relaunched, "--model"), flagValue(first, "--model"));
+		assert.equal(tmuxSessionExists(run.tmuxSession), true);
+	});
+});
+
+test("the bundled skill names the subagent tool first and the CLI second", () => {
+	const skill = readFileSync(join(import.meta.dirname, "skills", "subagent", "SKILL.md"), "utf8");
+	const tool = skill.indexOf("Use the `subagent` tool first");
+	assert.ok(tool > 0 && tool < skill.indexOf("Use the CLI second"));
 });
