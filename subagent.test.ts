@@ -781,6 +781,18 @@ test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () =>
 	assert.equal(byName("c2").state, "queued", "no slot is free");
 });
 
+test("subagentLimit in Pi's settings limits a session to 2 children, and PI_SUBAGENT_LIMIT overrides it", () => {
+	mkdirSync(agentDir(), { recursive: true });
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ subagentLimit: 2 }));
+
+	const outputs = spawnMany(3, { PI_SESSION_ID: "parent", PI_SUBAGENT_QUEUE: "1" });
+	assert.deepEqual(listRuns().map((run) => run.state), ["starting", "starting", "queued"]);
+	assert.match(outputs[2], /\nState: queued, starts when fewer than 2 children run\n/);
+
+	const [override] = spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "9" });
+	assert.match(override, /\nState: queued, starts when fewer than 9 children run\n/, "older children wait, so it queues");
+});
+
 test("when a child ends, the next tick starts the queued child with the caller's environment and its prompt", async () => {
 	spawnMany(3, { ...queueEnv, AWS_PROFILE: "caller" });
 	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);

@@ -82,7 +82,7 @@ Below the Pi editor, each child has one row: its state, name, time in the curren
 
 ### At most 4 children run at once
 
-In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. Set `PI_SUBAGENT_LIMIT` before you start Pi to change the limit. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
+In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. To change the limit, set `subagentLimit` in `~/.pi/agent/settings.json` (`{ "subagentLimit": 2 }`); `PI_SUBAGENT_LIMIT`, set before you start Pi, overrides it. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
 
 ### Results arrive as messages
 

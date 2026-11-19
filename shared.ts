@@ -556,10 +556,18 @@ export function pruneStaleRuns(): void {
 	}
 }
 
-/** Children that may run at once in one parent session: `PI_SUBAGENT_LIMIT`, default 4. */
+/** Children that may run at once in one parent session: `PI_SUBAGENT_LIMIT`, else `subagentLimit` in Pi's settings, else 4. */
 export function runLimit(): number {
-	const limit = Number(process.env.PI_SUBAGENT_LIMIT);
-	return Number.isInteger(limit) && limit > 0 ? limit : 4;
+	const valid = (value: unknown) => Number.isInteger(value) && (value as number) > 0;
+	const fromEnv = Number(process.env.PI_SUBAGENT_LIMIT);
+	if (valid(fromEnv)) return fromEnv;
+	try {
+		const { subagentLimit } = JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")) as { subagentLimit?: unknown };
+		if (valid(subagentLimit)) return subagentLimit as number;
+	} catch {
+		// No settings: the default.
+	}
+	return 4;
 }
 
 /** Whether a new child of these runs must queue: the limit is reached, or older children wait. */
