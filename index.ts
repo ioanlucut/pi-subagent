@@ -256,6 +256,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		if (!metadata) return;
 		updateMetadata(runDir, {
 			childSessionId: ctx.sessionManager.getSessionId(),
+			// The parent checks these each tick to find out, with no program started, whether this child runs.
+			childPid: process.pid,
+			childStarted: processStartTime(process.pid),
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: ctx.isIdle() ? "idle" : "busy",
 			suspended: undefined,
