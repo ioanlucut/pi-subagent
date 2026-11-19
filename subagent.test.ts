@@ -728,6 +728,21 @@ test("spawn --worktree reuses a clean worktree of the same branch, and refuses o
 	assert.equal(readFileSync(join(worktree, "wip.txt"), "utf8"), "work\n");
 });
 
+test("PI_SUBAGENT_WORKTREE_ROOT moves the worktree root", async () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(root, "trees", "repo", "t1");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "t1", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+		PI_SUBAGENT_WORKTREE_ROOT: join(root, "trees"),
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "t1");
+	assert.equal((await childEnv(agentDir())).get("PWD"), worktree);
+});
+
 test("stop leaves the worktree and its branch", () => {
 	const { repo, home } = gitRepo();
 	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "t1");

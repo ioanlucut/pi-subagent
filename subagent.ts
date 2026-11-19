@@ -142,7 +142,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 /**
- * The worktree `~/WORK/dev/.worktrees/<repo>/<topic>` on branch `<topic>`, made from `base`.
+ * The worktree `<root>/<repo>/<topic>` on branch `<topic>`, made from `base`. The root is
+ * `PI_SUBAGENT_WORKTREE_ROOT`, else `~/WORK/dev/.worktrees`, as the spec asks.
  * An existing path is reused only when it is a clean worktree of that branch, so no work is lost.
  */
 function prepareWorktree(repoDir: string, topic: string, base: string | undefined): string {
@@ -150,7 +151,8 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 	if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(topic)) fail(`Invalid worktree topic: ${topic}`);
 	// The common Git directory sits in the main checkout, so every worktree of a repository maps to one <repo>.
 	const commonDir = git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-	const path = join(homedir(), "WORK", "dev", ".worktrees", basename(dirname(commonDir)), topic);
+	const worktreeRoot = process.env.PI_SUBAGENT_WORKTREE_ROOT || join(homedir(), "WORK", "dev", ".worktrees");
+	const path = join(resolve(worktreeRoot), basename(dirname(commonDir)), topic);
 	if (existsSync(path)) {
 		const check = (args: string[]) => spawnSync("git", args, { cwd: path, encoding: "utf8" }).stdout?.trim();
 		const reusable =
