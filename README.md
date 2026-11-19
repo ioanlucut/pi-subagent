@@ -60,7 +60,7 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 | `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child, or queue it past the limit (see below). Prints its handle and the tmux attach command.                                                                          |
 | `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).                                                                                                |
 | `subagent status <handle>`                                       | One child's state and model.                                                                                                                                                    |
-| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. |
+| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. A child past its `spawn --timeout` is stopped and prints `<handle> timed out`, exit 1. |
 | `subagent send <handle> <message>`                               | Idle child: start a new turn. Busy child: steer the current turn.                                                                                                               |
 | `subagent send <handle> --follow-up <message>`                   | Busy child: queue a turn after the current one.                                                                                                                                 |
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
@@ -90,7 +90,7 @@ Subagent review-spec (a1b2c3) finished
 <the child's answer>
 ```
 
-The first line ends with `finished`, `failed (error)`, `failed (aborted)`, or `exited` (the process ended and nobody stopped it). An answer longer than 2,000 characters arrives as its first 2,000 characters and the path of a file in the run directory that holds it whole; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
+The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). An answer longer than 2,000 characters arrives as its first 2,000 characters and the path of a file in the run directory that holds it whole; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
 
 Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print and JSON modes end with the turn, so there the agent uses `wait`.
 
@@ -122,6 +122,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net`; `-cc-safety-net` in the list drops the guard. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
+| `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch. Past it, the child is stopped and reported as `timed out`; its run and transcript stay. |
 
 ## Recipes
 

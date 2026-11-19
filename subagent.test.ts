@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { pendingResults, reportSettledTurn } from "./outbox.ts";
+import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -112,10 +112,10 @@ function onlyRunDir(agentDir: string): string {
 }
 
 /** Spawn `count` children through the CLI into the agent dir this process uses. */
-function spawnChildren(count: number, env: NodeJS.ProcessEnv = {}): void {
+function spawnChildren(count: number, env: NodeJS.ProcessEnv = {}, args: string[] = []): void {
 	const bin = fakePi(join(root, "bin"));
 	for (let i = 0; i < count; i++) {
-		const result = runCli(["spawn", "--cwd", root, "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), ...env });
+		const result = runCli(["spawn", "--cwd", root, ...args, "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), ...env });
 		assert.equal(result.status, 0, result.stderr);
 	}
 }
@@ -803,4 +803,48 @@ test("a guarded timer callback that throws does not throw, logs once, and runs a
 	assert.equal(calls, 2);
 	assert.equal(logged.length, 1);
 	assert.match(logged[0], /^pi-subagent: widget failed, retrying each tick: RangeError: Invalid count value: -1/);
+});
+
+test("wait on a busy child with --timeout 2s reports it timed out after about 2 s, and keeps its transcript", () => {
+	const launched = Date.now();
+	spawnChildren(1, {}, ["--timeout", "2s"]);
+	const [run] = listRuns();
+	const deadline = Date.parse(run.deadline ?? "");
+	assert.ok(deadline - launched >= 2000 && deadline - launched < 2000 + (Date.now() - launched), run.deadline);
+
+	const result = runCli(["wait", run.handle], {});
+
+	// `wait` polls each 500 ms; the rest is program starts on a slow machine.
+	const late = Date.now() - deadline;
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stdout, new RegExp(`^${run.handle} timed out\\n\\nIt passed its time limit of 2s and was stopped\\. Transcript: ${run.sessionFile}\\n$`));
+	assert.ok(late >= 0 && late < 5000, `stopped ${late} ms after the deadline`);
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(existsSync(run.sessionFile), true);
+});
+
+test("a child past its time limit is stopped by the parent tick and reported once as timed out", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent" }, ["--timeout", "1s"]);
+	await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+
+	for (let i = 0; i < 3; i++) {
+		const runs = listRuns("parent");
+		stopTimedOutRuns(runs);
+		reportExitedRuns(runs);
+	}
+
+	const [run] = listRuns("parent");
+	const pending = pendingResults([run]);
+	assert.equal(pending?.files.length, 1);
+	assert.match(pending.text, new RegExp(`^Subagent ${run.handle} timed out\\n\\nIt passed its time limit of 1s and was stopped\\.`));
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(existsSync(run.sessionFile), true);
+});
+
+test("spawn rejects a time limit that is not a duration", () => {
+	const result = runCli(["spawn", "--cwd", root, "--timeout", "soon", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /--timeout must be a duration such as 90s, 10m, or 1h/);
+	assert.deepEqual(listRuns(), []);
 });
