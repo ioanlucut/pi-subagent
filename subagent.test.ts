@@ -775,6 +775,22 @@ test("stop removes a queued child, and it never starts", async () => {
 	assert.equal(tmuxSessionExists(queued.tmuxSession), false);
 });
 
+test("a queued child's time limit counts from its start, not from its spawn", async () => {
+	spawnMany(2, queueEnv);
+	const bin = fakePi(join(root, "bin"));
+	assert.equal(runCli(["spawn", "--name", "late", "--cwd", root, "--timeout", "1s", "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), ...queueEnv }).status, 0);
+	await new Promise((resolveDelay) => setTimeout(resolveDelay, 1500));
+
+	stopTimedOutRuns(listRuns("parent"));
+	assert.equal(byName("late").timedOut, undefined, "a queued child is not stopped");
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+
+	const started = byName("late");
+	assert.equal(started.state, "starting");
+	assert.ok(Date.parse(started.deadline!) > Date.now(), "the limit starts with the child");
+});
+
 test("a spawn with no parent tick starts each child at once, past the limit", () => {
 	spawnMany(3, { ...queueEnv, PI_SUBAGENT_QUEUE: "" });
 

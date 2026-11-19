@@ -273,10 +273,6 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
  * with `startLaunch`, and the child still gets the environment of the `spawn` caller.
  */
 export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
-	// The limit counts from each launch, so a resumed child is not stopped for the time it was suspended.
-	// Written before tmux starts the child, which writes this file too.
-	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
-	if (limit !== undefined) updateMetadata(metadata.runDir, { deadline: new Date(Date.now() + limit).toISOString() });
 	// A file in the working directory must not choose the program: a cloned repository could.
 	const launcher = process.env.PI_SUBAGENT_PI || "pi";
 	writeLaunchFile(
@@ -300,6 +296,10 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 
 /** Start the tmux session of a run whose launch `prepareLaunch` saved. */
 function startLaunch(metadata: RunMetadata): void {
+	// The limit counts from each launch, so a resumed or queued child is not stopped for the time it did not run.
+	// Written before tmux starts the child, which writes this file too.
+	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
+	if (limit !== undefined) updateMetadata(metadata.runDir, { deadline: new Date(Date.now() + limit).toISOString() });
 	const launchFile = join(metadata.runDir, "launch.json");
 	const result = spawnSync(
 		"tmux",
