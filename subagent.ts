@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
+import { clearResults, markExitKnown, markWaiting, stopTimedOutRuns, timedOutText } from "./outbox.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -16,6 +16,7 @@ import {
 	inboxHasMessages,
 	launchRun,
 	listRuns,
+	parseDuration,
 	readLatestAssistant,
 	readMetadata,
 	removeRunDir,
@@ -61,7 +62,8 @@ function usage(): never {
   subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
     [--cwd <dir>] [--worktree <topic> [--base <branch>]] [--tools <names>]
     [--no-extensions | --extensions <list>] [--no-mcp] [--no-skills]
-    [--no-prompt-templates] [--no-context-files] (--prompt <text> | --file <path>)...
+    [--no-prompt-templates] [--no-context-files] [--timeout <duration>]
+    (--prompt <text> | --file <path>)...
   subagent status <handle>
   subagent rename <handle> <name>
   subagent send <handle> [--follow-up] <message>
@@ -151,6 +153,7 @@ function spawnSubagent(args: string[]): void {
 	let noSkills = false;
 	let noPromptTemplates = false;
 	let noContextFiles = false;
+	let timeout: string | undefined;
 	const prompts: string[] = [];
 	const files: string[] = [];
 
@@ -207,6 +210,11 @@ function spawnSubagent(args: string[]): void {
 				break;
 			case "--no-context-files":
 				noContextFiles = true;
+				break;
+			case "--timeout":
+				timeout = valueAfter(args, i, arg);
+				if (parseDuration(timeout) === undefined) fail("--timeout must be a duration such as 90s, 10m, or 1h");
+				i++;
 				break;
 			case "--prompt":
 				prompts.push(valueAfter(args, i, arg));
@@ -269,6 +277,7 @@ function spawnSubagent(args: string[]): void {
 		model,
 		thinking,
 		launchArgs,
+		timeout,
 		state: "starting",
 		hasStarted: false,
 		createdAt: now,
@@ -361,8 +370,17 @@ async function waitSubagent(args: string[]): Promise<void> {
 	const deadline = Date.now() + timeoutSeconds * 1000;
 
 	while (Date.now() < deadline) {
-		const metadata = getRun(handle);
+		let metadata = getRun(handle);
 		markWaiting(metadata.runDir);
+		// Outside a Pi parent no tick enforces the limit, so `wait` does.
+		stopTimedOutRuns([metadata]);
+		metadata = getRun(handle);
+		if (metadata.timedOut) {
+			process.stdout.write(`${handle} timed out\n\n${timedOutText(metadata)}\n`);
+			process.exitCode = 1;
+			clearResults(metadata.runDir);
+			return;
+		}
 		const pending = inboxHasMessages(metadata.runDir);
 		const state = effectiveRunState(metadata);
 		if (state === "error") fail(metadata.error || `${handle} failed`);

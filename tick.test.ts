@@ -38,7 +38,7 @@ function tmuxCalls(): string[] {
 }
 
 /** A run of the parent session whose child is a live process. */
-function liveRun(handle: string): { run: RunMetadata; child: ChildProcess } {
+function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMetadata; child: ChildProcess } {
 	const child = spawn("sleep", ["60"], { stdio: "ignore" });
 	children.push(child);
 	const runDir = join(process.env.PI_CODING_AGENT_DIR as string, "subagents", handle);
@@ -56,6 +56,7 @@ function liveRun(handle: string): { run: RunMetadata; child: ChildProcess } {
 		childStarted: processStartTime(child.pid!),
 		createdAt: now,
 		updatedAt: now,
+		...patch,
 	} as RunMetadata;
 	writeMetadata(run);
 	return { run, child };
@@ -143,6 +144,16 @@ test("a result that cannot be sent yet keeps the tick until it is sent", async (
 	const count = shown.length;
 	mock.timers.tick(5000);
 	assert.equal(shown.length, count);
+});
+
+test("a child past its time limit is stopped by the tick and reported as timed out", () => {
+	const { tick, sent } = parentTick();
+	liveRun("aaa111", { deadline: new Date(Date.now() - 1000).toISOString() });
+
+	tick.wake();
+
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+	assert.match(sent.join(), /^Subagent aaa111 timed out\n/);
 });
 
 test("wake while the tick runs starts no second timer", () => {

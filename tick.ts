@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { pendingResults, reportExitedRuns } from "./outbox.ts";
+import { pendingResults, reportExitedRuns, stopTimedOutRuns } from "./outbox.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
 export interface SessionTickOptions {
@@ -48,6 +48,7 @@ export class SessionTick {
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
+		stopTimedOutRuns(runs);
 		const starting = reportExitedRuns(runs);
 		const pending = pendingResults(runs);
 		if (pending) {
