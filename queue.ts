@@ -39,6 +39,9 @@ function liveRunCount(runs: RunMetadata[]): number {
 	return runs.filter((run) => isLive(effectiveRunState(run))).length;
 }
 
+/** This Pi's start time, read once: `ps` costs a program start on the UI thread. */
+let ownStartTime: string | undefined;
+
 /** The parent tick: start the session's queued runs, oldest first, while fewer than the limit run. */
 export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
 	const runs = listRuns(sessionId);
@@ -49,7 +52,8 @@ export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, m
 		if (free <= 0) return;
 		if (run.state !== "queued") continue;
 		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
-		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: processStartTime(process.pid) });
+		ownStartTime ??= processStartTime(process.pid);
+		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: ownStartTime });
 		// `stop` removed the run since the listing.
 		if (!starting) continue;
 		free--;
