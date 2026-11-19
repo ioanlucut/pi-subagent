@@ -16,6 +16,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
+	effectiveRunState,
 	guarded,
 	getRunsDir,
 	listRuns,
@@ -258,6 +259,17 @@ test("a resumed orphan belongs to the new parent, so the next sweep leaves it ru
 	const [run] = listRuns();
 	assert.equal(run.parentPid, process.pid);
 	assert.equal(tmuxSessionExists(run.tmuxSession), true);
+});
+
+test("a resumed child is starting, not exited, before its new process records its ID", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent-session" });
+	const [run] = listRuns();
+	updateMetadata(run.runDir, { childPid: deadPid(), childStarted: "Thu Jan  1 00:00:00 1970" });
+	await suspendRuns([run]);
+
+	resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
+
+	assert.equal(effectiveRunState(listRuns()[0]), "starting");
 });
 
 test("suspendOrphanedRuns treats a reused parent process ID as a dead parent", async () => {
