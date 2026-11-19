@@ -69,6 +69,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
 | `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts.                                                                                                          |
+| `subagent resume <handle>`                                       | Start a suspended child, such as one suspended more than 24 h ago. It queues past the limit, as `spawn` does.                                                                    |
 | `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
@@ -252,13 +253,13 @@ The child works in `~/WORK/dev/.worktrees/my-app/17_login` on branch `17_login`.
 | `/reload` in the parent                                                | Nothing. Children keep running.                                                                                                         |
 | The parent quits or switches session                                   | Running children are suspended: the process stops, transcript and metadata stay. Children that already exited on their own are removed. |
 | The parent dies without quitting                                       | The next Pi to start, in any session, suspends them.                                                                                    |
-| The parent session starts again (`pi --resume`, `pi --session <file>`) | Suspended children start again, idle, with their full history.                                                                          |
+| The parent session starts again (`pi --resume`, `pi --session <file>`) | Children suspended in the last 24 h start again through the queue, idle, with their full history. Older ones stay suspended until `subagent resume`. |
 | `subagent stop`                                                        | Removed: tmux session and metadata. A transcript with an answer is copied first, see below.                                             |
 | A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed. A child tmux session whose run directory is gone is ended.     |
 
 A removed child's transcript goes to Pi's sessions for its working directory, under its Pi session ID: `~/.pi/agent/sessions/--<cwd>--/<time>_<id>.jsonl`. `stop` prints the path. `pi --resume` in that directory lists it, so you can read what the child did, or continue it as a normal session. A child that never answered leaves no transcript.
 
-A suspended child shows as `exited`, is hidden from the rows below the editor and `/subagent`, and refuses `send` and `wait` until its parent session starts again. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
+A suspended child shows as `suspended` in `list` and `status`, is hidden from the rows below the editor and `/subagent`, and refuses `send` and `wait` until its parent session starts again or `subagent resume` starts it. Children cannot spawn their own subagents. A Pi that a child starts from its tools (a test, a script) is not that child and cannot spawn subagents.
 
 ## How it works
 

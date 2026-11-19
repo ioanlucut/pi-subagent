@@ -802,6 +802,67 @@ test("a spawn with no parent tick starts each child at once, past the limit", ()
 	}
 });
 
+test("resuming a session with 6 suspended children and a limit of 2 starts 2 and queues 4", async () => {
+	spawnMany(6, { PI_SESSION_ID: "parent" });
+	await suspendRuns(listRuns());
+
+	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+
+	const runs = listRuns();
+	assert.deepEqual(runs.map((run) => [run.name, run.state]), [["c0", "starting"], ["c1", "starting"], ["c2", "queued"], ["c3", "queued"], ["c4", "queued"], ["c5", "queued"]]);
+	assert.deepEqual(runs.map((run) => tmuxSessionExists(run.tmuxSession)), [true, true, false, false, false, false]);
+});
+
+test("a child suspended 25 hours ago stays suspended after resume, and list shows it as suspended", async () => {
+	spawnMany(2, { PI_SESSION_ID: "parent" });
+	await suspendRuns(listRuns());
+	updateMetadata(byName("c0").runDir, { suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+
+	resumeSuspendedRuns("parent", (_run, error) => assert.fail(error));
+
+	assert.equal(tmuxSessionExists(byName("c0").tmuxSession), false);
+	assert.equal(byName("c0").suspended, true);
+	assert.equal(byName("c1").state, "starting", "a child suspended just now starts");
+	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c0 \(\w+\)  suspended  /m);
+	assert.match(runCli(["status", byName("c0").handle], {}).stdout, /^c0 \(\w+\): suspended /);
+});
+
+/** A child of session `parent` suspended 25 hours ago, so resuming the session leaves it suspended. */
+async function oldSuspendedChild(): Promise<string> {
+	spawnMany(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	await suspendRuns([run]);
+	updateMetadata(run.runDir, { name: "old", suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+	return run.handle;
+}
+
+test("subagent resume queues a suspended child, and it starts when a slot is free", async () => {
+	const handle = await oldSuspendedChild();
+	spawnMany(2, queueEnv);
+
+	const result = runCli(["resume", handle], queueEnv);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /^Resumed old \(\w+\)\nState: queued, starts when fewer than 2 children run\n/);
+	await tick();
+	assert.equal(byName("old").state, "queued", "no slot is free");
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+	assert.equal(byName("old").state, "starting");
+	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
+});
+
+test("subagent resume with no parent tick starts the child at once", async () => {
+	const handle = await oldSuspendedChild();
+
+	const result = runCli(["resume", handle], { PATH: `${join(root, "bin")}:${basePath}` });
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /^Resumed old \(\w+\)\nState: busy\n/);
+	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
+	assert.equal(runCli(["resume", handle], {}).status, 1, "a running child cannot be resumed");
+});
+
 test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {
 	const logged: string[] = [];
 	const error = console.error;

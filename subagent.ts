@@ -20,6 +20,7 @@ import {
 	mustQueue,
 	prepareLaunch,
 	parseDuration,
+	queueSuspendedRun,
 	readLatestAssistant,
 	readMetadata,
 	removeRunDir,
@@ -28,6 +29,7 @@ import {
 	type InboxMessage,
 	type RunMetadata,
 	runLimit,
+	startLaunch,
 	tmuxSessionExists,
 	turnOutcome,
 	updateMetadata,
@@ -75,6 +77,7 @@ function usage(): never {
   subagent last <handle>
   subagent interrupt <handle>
   subagent stop <handle>
+  subagent resume <handle>
   subagent list
   subagent agents`);
 }
@@ -336,11 +339,17 @@ function spawnSubagent(callerArgs: string[]): void {
 	);
 }
 
+/** The state `list` and `status` print: a suspended child is not dead, it waits for its session or `resume`. */
+function shownState(metadata: RunMetadata): string {
+	const state = effectiveRunState(metadata);
+	return metadata.suspended && state === "exited" ? "suspended" : state;
+}
+
 function statusSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	process.stdout.write(
-		`${runDisplayName(metadata)}: ${effectiveRunState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
+		`${runDisplayName(metadata)}: ${shownState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
 	);
 }
 
@@ -442,6 +451,37 @@ async function stopSubagent(args: string[]): Promise<void> {
 	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n${transcript}`);
 }
 
+/**
+ * Start a suspended child by hand, such as one that resume left suspended because it is older than a day.
+ * It queues as `spawn` does, behind the limit of the parent session that runs this command.
+ */
+function resumeSubagent(args: string[]): void {
+	if (args.length !== 1) usage();
+	const metadata = getRun(args[0]);
+	if (!metadata.suspended || metadata.state === "queued" || tmuxSessionExists(metadata.tmuxSession)) fail(`${metadata.handle} is not suspended`);
+	const session = metadata.parentSessionId;
+	// Only the tick of the parent session's own Pi starts its queued runs.
+	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && session !== undefined && session === process.env.PI_SESSION_ID && mustQueue(listRuns(session));
+	// This caller is the parent now, as for `spawn`, so the orphan sweep follows it.
+	const prepared = queueSuspendedRun(metadata, {
+		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
+		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
+	});
+	if (!queued) {
+		const starting = updateMetadata(prepared.runDir, { state: "starting" }) ?? prepared;
+		try {
+			startLaunch(starting);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateMetadata(prepared.runDir, { state: "error", error: message });
+			fail(message);
+		}
+	}
+	process.stdout.write(
+		`Resumed ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
+	);
+}
+
 function lastSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
@@ -480,7 +520,7 @@ function listSubagents(args: string[]): void {
 	}
 	for (const metadata of runs) {
 		process.stdout.write(
-			`${runDisplayName(metadata)}  ${effectiveRunState(metadata).padEnd(8)}  ${metadata.provider}/${metadata.model}  ${metadata.thinking}\n`,
+			`${runDisplayName(metadata)}  ${shownState(metadata).padEnd(8)}  ${metadata.provider}/${metadata.model}  ${metadata.thinking}\n`,
 		);
 	}
 }
@@ -512,6 +552,9 @@ async function main(): Promise<void> {
 			break;
 		case "stop":
 			await stopSubagent(args);
+			break;
+		case "resume":
+			resumeSubagent(args);
 			break;
 		case "list":
 			listSubagents(args);
