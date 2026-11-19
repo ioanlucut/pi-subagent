@@ -108,6 +108,8 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--provider`, `--model`                | the parent's                                         | Pick another model. Required for independent opinions.                                |
 | `--thinking <level>`                   | the parent's, else `medium`                          | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.                            |
 | `--cwd <dir>`                          | current directory                                    | Where the child works.                                                                |
+| `--worktree <topic>`                   | off                                                  | Create `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` and work there. Reuses a clean worktree of that branch; fails if the path has other work. `stop` keeps it. |
+| `--base <branch>`                      | the current branch                                   | With `--worktree`: where the new branch starts.                                       |
 | `--tools <names>`                      | Pi's default tools (`read`, `bash`, `edit`, `write`) | Comma-separated allowlist. `read,grep,find,ls` is read-only. `bash` can change files. |
 | `--prompt <text>`                      |                                                      | Repeatable. All prompts go into the first turn.                                       |
 | `--file <path>`                        |                                                      | Repeatable. Attached to the first turn.                                               |
@@ -192,7 +194,13 @@ subagent spawn --name implement --file /tmp/spec.md \
   --prompt "Implement this specification" --prompt "Run the targeted tests"
 ```
 
-Two children that edit the same checkout will conflict. Give each its own worktree with `--cwd`.
+Two children that edit the same checkout will conflict. Give each its own worktree with `--worktree`:
+
+```sh
+subagent spawn --name impl-17 --cwd ~/WORK/dev/my-app --worktree 17_login --base main --file /tmp/spec.md
+```
+
+The child works in `~/WORK/dev/.worktrees/my-app/17_login` on branch `17_login`. `subagent stop` keeps the worktree and the branch; merge and remove them with Git.
 
 `PI_SUBAGENT_PI` names the program a child runs in place of `pi`, for tests. Upstream ran an executable `pi-test.sh` from `--cwd`, so a cloned repository could choose the program; this fork does not.
 

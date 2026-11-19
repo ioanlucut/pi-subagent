@@ -610,6 +610,75 @@ test("a child with no new flags starts as today: all extensions and MCP servers"
 	assert.deepEqual(extensionFlags(args), []);
 });
 
+/** A Git repository named `repo` with one commit on `main`, and the home that holds its worktrees. */
+function gitRepo(): { repo: string; home: string } {
+	const home = join(root, "home");
+	const repo = join(root, "repo");
+	mkdirSync(home);
+	mkdirSync(repo);
+	const git = (...args: string[]) => {
+		const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: repo, encoding: "utf8", env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: "1" } });
+		assert.equal(result.status, 0, result.stderr);
+	};
+	git("init", "-q", "-b", "main");
+	writeFileSync(join(repo, "a.txt"), "a\n");
+	git("add", "a.txt");
+	git("commit", "-q", "-m", "init");
+	git("checkout", "-q", "-b", "other");
+	return { repo, home };
+}
+
+function gitOut(cwd: string, ...args: string[]): string {
+	return spawnSync("git", args, { cwd, encoding: "utf8" }).stdout.trim();
+}
+
+test("spawn --worktree creates the worktree on a new branch from --base and starts the child in it", async () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "t1");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "t1", "--base", "main", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, new RegExp(`\nWorktree: ${worktree} \\(branch t1\\)\n`));
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "t1");
+	assert.equal(gitOut(worktree, "rev-parse", "HEAD"), gitOut(repo, "rev-parse", "main"));
+	assert.equal((await childEnv(agentDir())).get("PWD"), worktree);
+});
+
+test("spawn --worktree reuses a clean worktree of the same branch, and refuses one with other work", () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "t1");
+	const env = { ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), HOME: home };
+	const spawn = () => runCli(["spawn", "--cwd", repo, "--worktree", "t1", "--prompt", "hi"], env);
+	assert.equal(spawn().status, 0);
+	assert.equal(spawn().status, 0, "a clean worktree of the same branch is reused");
+	writeFileSync(join(worktree, "wip.txt"), "work\n");
+
+	const result = spawn();
+
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /has other work/);
+	assert.equal(listRuns().length, 2, "no third child");
+	assert.equal(readFileSync(join(worktree, "wip.txt"), "utf8"), "work\n");
+});
+
+test("stop leaves the worktree and its branch", () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "t1");
+	const env = { ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), HOME: home };
+	assert.equal(runCli(["spawn", "--cwd", repo, "--worktree", "t1", "--prompt", "hi"], env).status, 0);
+	const [run] = listRuns();
+
+	const result = runCli(["stop", run.handle], env);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "t1");
+	assert.ok(gitOut(repo, "rev-parse", "--verify", "refs/heads/t1"), "the branch is kept");
+});
+
 test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {
 	const logged: string[] = [];
 	const error = console.error;
