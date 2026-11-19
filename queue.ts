@@ -126,7 +126,8 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
 	for (const run of listRuns(sessionId)) {
 		if (!run.suspended || run.state === "queued" || tmuxSessionExists(run.tmuxSession)) continue;
-		if (!existsSync(run.sessionFile)) {
+		// A run that never started has no transcript, but its saved launch still holds its task.
+		if (!existsSync(run.sessionFile) && !existsSync(join(run.runDir, "launch.json"))) {
 			removeRunDir(run.runDir);
 			continue;
 		}

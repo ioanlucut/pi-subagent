@@ -907,6 +907,19 @@ test("a queued child is suspended when its parent quits: after 25 h it stays sus
 	assert.equal(JSON.parse(readFileSync(join(byName("c3").runDir, "argv"), "utf8")).at(-1), "Task:\ntask 3");
 });
 
+test("a suspended queued child with a saved launch but no transcript is queued on resume; one with neither is removed", async () => {
+	spawnMany(3, queueEnv);
+	await suspendSessionRuns("parent");
+	rmSync(byName("c2").sessionFile);
+	const gone = byName("c1");
+	for (const file of [gone.sessionFile, join(gone.runDir, "launch.json")]) rmSync(file, { force: true });
+
+	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+
+	assert.equal(byName("c2")?.state, "starting", "its saved launch keeps the task");
+	assert.equal(existsSync(gone.runDir), false, "nothing to start it with");
+});
+
 /** A child of session `parent` suspended 25 hours ago, so resuming the session leaves it suspended. */
 async function oldSuspendedChild(): Promise<string> {
 	spawnMany(1, { PI_SESSION_ID: "parent" });
