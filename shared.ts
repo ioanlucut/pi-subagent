@@ -28,6 +28,10 @@ export interface RunMetadata {
 	/** Start time of the parent pi (`ps -o lstart`), so a reused process ID does not count as the parent. */
 	parentStarted?: string;
 	childSessionId?: string;
+	/** Process ID of the child pi, written by the child when its session starts. */
+	childPid?: number;
+	/** Start time of the child pi (`ps -o lstart`), so a reused process ID does not count as the child. */
+	childStarted?: string;
 	tmuxSession: string;
 	runDir: string;
 	sessionFile: string;
@@ -296,10 +300,36 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 	}
 }
 
+/** Verdicts on (process ID, start time) pairs, so `ps` runs once per child and not on each tick. */
+const checkedChildren = new Map<string, boolean>();
+
+/**
+ * Whether the run's child process runs, with no program started in the normal case: the widget and
+ * result ticks call this each second on Pi's UI thread, where one `tmux` call can take 2 s on a busy
+ * machine. A process ID can be reused, so the start time is checked once with `ps`; an ID once found
+ * dead stays dead. Runs from before the child recorded its process ID still ask tmux.
+ */
+function childIsAlive(metadata: RunMetadata): boolean {
+	const pid = metadata.childPid;
+	if (pid === undefined) return tmuxSessionExists(metadata.tmuxSession);
+	const key = `${pid} ${metadata.childStarted}`;
+	if (checkedChildren.get(key) === false || !processExists(pid)) {
+		checkedChildren.set(key, false);
+		return false;
+	}
+	const known = checkedChildren.get(key);
+	if (known !== undefined || metadata.childStarted === undefined) return known ?? true;
+	const started = processStartTime(pid);
+	// Unknown start time: keep the child, as for the parent, and ask again next tick.
+	if (started === undefined) return true;
+	checkedChildren.set(key, started === metadata.childStarted);
+	return started === metadata.childStarted;
+}
+
 export function effectiveRunState(metadata: RunMetadata): RunState {
 	if (
 		(metadata.state === "starting" || metadata.state === "busy" || metadata.state === "idle") &&
-		!tmuxSessionExists(metadata.tmuxSession)
+		!childIsAlive(metadata)
 	) {
 		return "exited";
 	}
@@ -468,6 +498,9 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 			updateMetadata(run.runDir, {
 				state: "starting",
 				error: undefined,
+				// The old process is gone; until the new one records its ID, tmux tells whether it runs.
+				childPid: undefined,
+				childStarted: undefined,
 				parentPid: process.pid,
 				parentStarted: processStartTime(process.pid),
 			}) ?? run;
