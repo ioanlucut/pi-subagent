@@ -16,6 +16,8 @@ import {
 	inboxHasMessages,
 	launchRun,
 	listRuns,
+	mustQueue,
+	prepareLaunch,
 	readLatestAssistant,
 	readMetadata,
 	removeRunDir,
@@ -23,6 +25,7 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
+	runLimit,
 	tmuxSessionExists,
 	turnOutcome,
 	updateMetadata,
@@ -252,12 +255,15 @@ function spawnSubagent(args: string[]): void {
 	if (noPromptTemplates) launchArgs.push("--no-prompt-templates");
 	if (noContextFiles) launchArgs.push("--no-context-files");
 
+	const parentSessionId = process.env.PI_SESSION_ID || undefined;
+	// Only a parent Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
+	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && parentSessionId !== undefined && mustQueue(listRuns(parentSessionId));
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
 		handle,
 		name,
-		parentSessionId: process.env.PI_SESSION_ID || undefined,
+		parentSessionId,
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
@@ -269,7 +275,7 @@ function spawnSubagent(args: string[]): void {
 		model,
 		thinking,
 		launchArgs,
-		state: "starting",
+		state: queued ? "queued" : "starting",
 		hasStarted: false,
 		createdAt: now,
 		updatedAt: now,
@@ -279,7 +285,8 @@ function spawnSubagent(args: string[]): void {
 	const initialArgs = files.map((file) => `@${file}`);
 	if (prompts.length > 0) initialArgs.push(`Task:\n${prompts.join("\n\n")}`);
 	try {
-		launchRun(metadata, initialArgs);
+		if (queued) prepareLaunch(metadata, initialArgs);
+		else launchRun(metadata, initialArgs);
 	} catch (error) {
 		removeRunDir(runDir);
 		throw error;
@@ -292,7 +299,7 @@ function spawnSubagent(args: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 

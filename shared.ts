@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 
 const launcherPath = join(dirname(fileURLToPath(import.meta.url)), "launcher.ts");
 
-export type RunState = "starting" | "busy" | "idle" | "exited" | "error";
+/** `queued`: written by `spawn` past the limit; the parent tick starts it when a slot is free. */
+export type RunState = "queued" | "starting" | "busy" | "idle" | "exited" | "error";
 
 export interface RunMetadata {
 	version: 1;
@@ -249,9 +250,18 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 
 /** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
 export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
+	prepareLaunch(metadata, initialArgs);
+	startLaunch(metadata);
+}
+
+/**
+ * Save the launch of a run without starting it, for a queued run: the parent tick starts it later
+ * with `startLaunch`, and the child still gets the environment of the `spawn` caller.
+ */
+export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
 	// A file in the working directory must not choose the program: a cloned repository could.
 	const launcher = process.env.PI_SUBAGENT_PI || "pi";
-	const launchFile = writeLaunchFile(
+	writeLaunchFile(
 		metadata.runDir,
 		{ ...process.env, PWD: metadata.cwd, PI_SUBAGENT_RUN_DIR: metadata.runDir },
 		[
@@ -268,7 +278,11 @@ export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): vo
 			...initialArgs,
 		],
 	);
+}
 
+/** Start the tmux session of a run whose launch `prepareLaunch` saved. */
+function startLaunch(metadata: RunMetadata): void {
+	const launchFile = join(metadata.runDir, "launch.json");
 	const result = spawnSync(
 		"tmux",
 		[
@@ -483,6 +497,46 @@ export function pruneStaleRuns(): void {
 	const cutoff = Date.now() - STALE_RUN_MS;
 	for (const run of listRuns()) {
 		if (Date.parse(run.updatedAt) < cutoff && !tmuxSessionExists(run.tmuxSession)) removeRunDir(run.runDir);
+	}
+}
+
+/** Children that may run at once in one parent session: `PI_SUBAGENT_LIMIT`, default 4. */
+export function runLimit(): number {
+	const limit = Number(process.env.PI_SUBAGENT_LIMIT);
+	return Number.isInteger(limit) && limit > 0 ? limit : 4;
+}
+
+/** Whether a new child of these runs must queue: the limit is reached, or older children wait. */
+export function mustQueue(runs: RunMetadata[]): boolean {
+	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
+}
+
+/** Children that hold a slot: started, and their process not known to have ended. */
+function liveRunCount(runs: RunMetadata[]): number {
+	return runs.filter((run) => ["starting", "busy", "idle"].includes(effectiveRunState(run))).length;
+}
+
+/** The parent tick: start the session's queued runs, oldest first, while fewer than the limit run. */
+export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
+	const runs = listRuns(sessionId);
+	// No queued run: no liveness check, so the tick costs only the listing.
+	if (!runs.some((run) => run.state === "queued")) return;
+	let free = runLimit() - liveRunCount(runs);
+	for (const run of runs) {
+		if (free <= 0) return;
+		if (run.state !== "queued") continue;
+		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
+		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: processStartTime(process.pid) });
+		// `stop` removed the run since the listing.
+		if (!starting) continue;
+		free--;
+		try {
+			startLaunch(starting);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			updateMetadata(run.runDir, { state: "error", error: message });
+			onError(run, message);
+		}
 	}
 }
 
