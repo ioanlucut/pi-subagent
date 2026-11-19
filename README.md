@@ -276,7 +276,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 ```
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
-- `tool.ts` is the `subagent` model tool. It runs `subagent.ts` with the session, model, and directory from Pi's tool context, so the tool and the CLI share one code path.
+- `tool.ts` is the `subagent` model tool, with its parameters in `tool-schema.ts`. It runs `subagent.ts` with the session, model, and directory from Pi's tool context, so the tool and the CLI share one code path.
 - `index.ts` is the extension. In the parent it shows one row per child, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date, with the child's process ID and start time.
 - `tick.ts` is the parent's one tick for the rows, the Herdr panes, the results, the time limits, and the queue. It runs each second only while the session has a child (queued ones included) or a result to send; it starts again when a tool call (`subagent spawn`) ends. A session with no children does no subagent work.
 - Each second the parent checks whether each child runs from that process ID (`kill(pid, 0)`), with no program started; `ps` checks the start time once per child, so a reused ID does not count. On a busy macOS any program start can take a second, and these checks run on Pi's UI thread. A run from before this change, with no process ID, still asks tmux.

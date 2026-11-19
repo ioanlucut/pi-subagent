@@ -1,35 +1,15 @@
 import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Static } from "typebox";
+import type { SubagentToolSchema } from "./tool-schema.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "subagent.ts");
 
 export const TOOL_ACTIONS = ["spawn", "list", "status", "wait", "send", "stop", "resume", "last", "agents"] as const;
 
-export interface SubagentToolParams {
-	action: (typeof TOOL_ACTIONS)[number];
-	handle?: string;
-	message?: string;
-	followUp?: boolean;
-	name?: string;
-	prompt?: string;
-	files?: string[];
-	agent?: string;
-	provider?: string;
-	model?: string;
-	thinking?: string;
-	cwd?: string;
-	worktree?: string;
-	base?: string;
-	tools?: string;
-	extensions?: string;
-	noExtensions?: boolean;
-	noMcp?: boolean;
-	noSkills?: boolean;
-	noPromptTemplates?: boolean;
-	noContextFiles?: boolean;
-	timeout?: string;
-}
+/** The tool's parameters, as Pi validated them against the schema. */
+export type SubagentToolParams = Static<typeof SubagentToolSchema>;
 
 /** The part of Pi's tool context the tool reads: what Pi's bash tool gives a `subagent` command in its environment. */
 export interface SubagentToolContext {

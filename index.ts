@@ -3,8 +3,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
-import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
 import { InboxDelivery } from "./inbox.ts";
 import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
 import {
@@ -26,7 +24,8 @@ import {
 import { HerdrPanes } from "./herdr-panes.ts";
 import { resumeSuspendedRuns } from "./queue.ts";
 import { SessionTick } from "./tick.ts";
-import { runSubagentTool, TOOL_ACTIONS, type SubagentToolParams } from "./tool.ts";
+import { runSubagentTool } from "./tool.ts";
+import { SubagentToolSchema } from "./tool-schema.ts";
 import { ActivityTracker, widgetLines } from "./widget.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
@@ -48,34 +47,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			description:
 				"Delegate work to a separate Pi in its own tmux session, as the `subagent` CLI does: spawn, list, status, wait, send, stop, resume, last, agents. Prints what the matching CLI command prints. Load the `subagent` skill for when and how to use each action.",
 			promptSnippet: "Spawn and talk to Pi subagents (same actions as the subagent CLI)",
-			parameters: Type.Object({
-				action: StringEnum(TOOL_ACTIONS),
-				handle: Type.Optional(Type.String({ description: "status, wait, send, stop, resume, last: the child's handle" })),
-				message: Type.Optional(Type.String({ description: "send: the message" })),
-				followUp: Type.Optional(Type.Boolean({ description: "send: queue after the current work (--follow-up)" })),
-				name: Type.Optional(Type.String({ description: "spawn: short name shown in the UI" })),
-				prompt: Type.Optional(Type.String({ description: "spawn: the task" })),
-				files: Type.Optional(Type.Array(Type.String(), { description: "spawn: files for the first prompt (--file)" })),
-				agent: Type.Optional(Type.String({ description: "spawn: role from an agent file (see action agents)" })),
-				provider: Type.Optional(Type.String()),
-				model: Type.Optional(Type.String()),
-				thinking: Type.Optional(Type.String()),
-				cwd: Type.Optional(Type.String()),
-				worktree: Type.Optional(Type.String({ description: "spawn: topic of a new worktree for the child" })),
-				base: Type.Optional(Type.String({ description: "spawn: base branch of the worktree" })),
-				tools: Type.Optional(Type.String({ description: "spawn: comma-separated tool allowlist" })),
-				extensions: Type.Optional(Type.String({ description: "spawn: light child, only these extensions (comma-separated)" })),
-				noExtensions: Type.Optional(Type.Boolean()),
-				noMcp: Type.Optional(Type.Boolean()),
-				noSkills: Type.Optional(Type.Boolean()),
-				noPromptTemplates: Type.Optional(Type.Boolean()),
-				noContextFiles: Type.Optional(Type.Boolean()),
-				timeout: Type.Optional(
-					Type.String({ description: "spawn: time limit such as 90s, 10m, 1h. wait: deadline in seconds (default 1800)" }),
-				),
-			}),
+			parameters: SubagentToolSchema,
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-				const { text, isError } = await runSubagentTool(params as SubagentToolParams, ctx, signal);
+				const { text, isError } = await runSubagentTool(params, ctx, signal);
 				return { content: [{ type: "text", text }], details: undefined, isError };
 			},
 		});
