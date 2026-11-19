@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
 import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
-import { mustQueue, queueSuspendedRun, runLimit, stopTimedOutRuns, timedOutText } from "./queue.ts";
+import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText } from "./queue.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -16,7 +16,6 @@ import {
 	getRunsDir,
 	inboxDir,
 	inboxHasMessages,
-	launchRun,
 	listRuns,
 	prepareLaunch,
 	parseDuration,
@@ -27,7 +26,6 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
-	startLaunch,
 	tmuxSessionExists,
 	turnOutcome,
 	updateMetadata,
@@ -312,8 +310,7 @@ function spawnSubagent(callerArgs: string[]): void {
 	if (noContextFiles) launchArgs.push("--no-context-files");
 
 	const parentSessionId = process.env.PI_SESSION_ID || undefined;
-	// Only a parent Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
-	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && parentSessionId !== undefined && mustQueue(listRuns(parentSessionId));
+	const queued = mustQueue(parentSessionId);
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
@@ -345,8 +342,8 @@ function spawnSubagent(callerArgs: string[]): void {
 	const firstPrompt = [instructions, task].filter(Boolean).join("\n\n");
 	if (firstPrompt) initialArgs.push(firstPrompt);
 	try {
-		if (queued) prepareLaunch(metadata, initialArgs);
-		else launchRun(metadata, initialArgs);
+		prepareLaunch(metadata, initialArgs);
+		if (!queued) startRun(metadata);
 	} catch (error) {
 		removeRunDir(runDir);
 		throw error;
@@ -359,7 +356,7 @@ function spawnSubagent(callerArgs: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 
@@ -483,27 +480,15 @@ function resumeSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	if (!metadata.suspended || metadata.state === "queued" || tmuxSessionExists(metadata.tmuxSession)) fail(`${metadata.handle} is not suspended`);
-	const session = metadata.parentSessionId;
 	// Only the tick of the parent session's own Pi starts its queued runs.
-	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && session !== undefined && session === process.env.PI_SESSION_ID && mustQueue(listRuns(session));
+	const queued = metadata.parentSessionId === process.env.PI_SESSION_ID && mustQueue(metadata.parentSessionId);
 	// This caller is the parent now, as for `spawn`, so the orphan sweep follows it.
 	const prepared = queueSuspendedRun(metadata, {
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
 	});
-	if (!queued) {
-		const starting = updateMetadata(prepared.runDir, { state: "starting" }) ?? prepared;
-		try {
-			startLaunch(starting);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateMetadata(prepared.runDir, { state: "error", error: message });
-			fail(message);
-		}
-	}
-	process.stdout.write(
-		`Resumed ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
-	);
+	if (!queued) startRun(prepared);
+	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
 }
 
 function lastSubagent(args: string[]): void {

@@ -31,9 +31,37 @@ export function runLimit(): number {
 	return 4;
 }
 
-/** Whether a new child of these runs must queue: the limit is reached, or older children wait. */
-export function mustQueue(runs: RunMetadata[]): boolean {
+/**
+ * Whether a new child of `sessionId` must queue: the limit is reached, or older children wait. Only a parent
+ * Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
+ */
+export function mustQueue(sessionId: string | undefined): boolean {
+	if (process.env.PI_SUBAGENT_QUEUE !== "1" || sessionId === undefined) return false;
+	const runs = listRuns(sessionId);
 	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
+}
+
+/** The `State:` line that `spawn` and `resume` print. */
+export function stateLine(queued: boolean): string {
+	return `State: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}`;
+}
+
+/**
+ * Start a run whose launch is saved: mark it `starting`, with `patch`, and start its tmux session. A launch
+ * that fails leaves the run `error` and throws. Returns the run as it is after the start, or undefined when
+ * `stop` removed it.
+ */
+export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
+	const starting = updateMetadata(run.runDir, { ...patch, state: "starting" });
+	if (!starting) return undefined;
+	try {
+		startLaunch(starting);
+	} catch (error) {
+		updateMetadata(run.runDir, { state: "error", error: error instanceof Error ? error.message : String(error) });
+		throw error;
+	}
+	// Read again: the launch wrote a new deadline.
+	return readMetadata(run.runDir) ?? starting;
 }
 
 function liveRunCount(runs: RunMetadata[]): number {
@@ -55,19 +83,17 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 		if (free <= 0 || run.state !== "queued") return [run];
 		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
 		ownStartTime ??= processStartTime(process.pid);
-		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: ownStartTime });
-		// `stop` removed the run since the listing.
-		if (!starting) return [];
-		free--;
 		try {
-			startLaunch(starting);
+			const started = startRun(run, { parentPid: process.pid, parentStarted: ownStartTime });
+			// `stop` removed the run since the listing.
+			if (!started) return [];
+			free--;
+			return [started];
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateMetadata(run.runDir, { state: "error", error: message });
-			onError(run, message);
+			free--;
+			onError(run, error instanceof Error ? error.message : String(error));
+			return [readMetadata(run.runDir) ?? run];
 		}
-		// Read again: the launch wrote a new deadline.
-		return [readMetadata(run.runDir) ?? starting];
 	});
 }
 

@@ -443,7 +443,7 @@ test("spawn tells the agent not to wait only when the parent delivers results", 
 	assert.match(notified.stdout, /\nResult: arrives as a message when the turn ends\. Do not run `subagent wait`\.\n$/);
 });
 
-/** A tmux session started the way `launchRun` starts a child, for the run directory `runDir`. */
+/** A tmux session started the way `startLaunch` starts a child, for the run directory `runDir`. */
 function childSession(name: string, runDir: string): void {
 	const result = spawnSync("tmux", ["new-session", "-d", "-s", name, "--", "/bin/sh", "-c", "sleep 60", "launch", join(runDir, "launch.json")]);
 	assert.equal(result.status, 0, String(result.stderr));

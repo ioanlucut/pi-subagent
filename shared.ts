@@ -272,15 +272,9 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 	return file;
 }
 
-/** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
-export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
-	prepareLaunch(metadata, initialArgs);
-	startLaunch(metadata);
-}
-
 /**
- * Save the launch of a run without starting it, for a queued run: the parent tick starts it later
- * with `startLaunch`, and the child still gets the environment of the `spawn` caller.
+ * Save the launch of a run for `startLaunch`, now or, for a queued run, later from the parent tick: the
+ * child still gets the environment of the `spawn` caller. `initialArgs` are only passed on first spawn.
  */
 export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
 	// A file in the working directory must not choose the program: a cloned repository could.
