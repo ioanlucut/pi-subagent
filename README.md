@@ -67,6 +67,7 @@ Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider
 | `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
 | `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle.                                                                                                                                                      |
+| `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
@@ -104,6 +105,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 
 | Option                                 | Default                                              | Use                                                                                   |
 | -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `--agent <name>`                       | none                                                 | Apply an agent file, see Agent files. The other flags override it.                    |
 | `--name <name>`                        | the handle                                           | Label in the UI, 1 to 64 characters.                                                  |
 | `--provider`, `--model`                | the parent's                                         | Pick another model. Required for independent opinions.                                |
 | `--thinking <level>`                   | the parent's, else `medium`                          | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.                            |
@@ -118,6 +120,36 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net`; `-cc-safety-net` in the list drops the guard. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
+
+## Agent files
+
+An agent file holds a role, so each `spawn` does not repeat its settings. `subagent spawn --agent implementer` reads `implementer.md` from `.pi/agents/` in the current directory, then from `~/.pi/agent/agents/`. A project file overrides a global file with the same name. An unknown name fails and starts nothing.
+
+```markdown
+---
+name: implementer
+description: Implements one ticket in its worktree
+model: anthropic/claude-opus-5-5
+thinking: high
+tools: read, bash, edit, write
+extensions: npm:pi-web-access, ./my-extension.ts
+mcp: false
+---
+Load the tdd skill. Commit with a conventional message.
+```
+
+| Field         | Same as                                                                       |
+| ------------- | ----------------------------------------------------------------------------- |
+| `name`        | `--agent <name>`. Default: the file name without `.md`.                       |
+| `description` | The text `subagent agents` shows.                                             |
+| `model`       | `--provider` and `--model` for `provider/model`, else `--model`.              |
+| `thinking`    | `--thinking`                                                                  |
+| `tools`       | `--tools`                                                                     |
+| `extensions`  | `--extensions`. A relative path is relative to the agent file.                |
+| `mcp`         | `false` is `--no-mcp`.                                                        |
+| body          | Added to the child's first prompt, before the `--prompt` text.                |
+
+Flags on `spawn` override the file: `--agent implementer --model x` uses model `x`. `--extensions` or `--no-extensions` replaces the file's extensions.
 
 ## Recipes
 

@@ -709,3 +709,81 @@ test("a guarded timer callback that throws does not throw, logs once, and runs a
 	assert.equal(logged.length, 1);
 	assert.match(logged[0], /^pi-subagent: widget failed, retrying each tick: RangeError: Invalid count value: -1/);
 });
+
+/** Write the agent file `<dir>/<name>.md` with `frontmatter` lines and `body`. */
+function agentFile(dir: string, name: string, frontmatter: string[], body = ""): void {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\n${frontmatter.join("\n")}\n---\n${body}`);
+}
+
+/** The value after `flag` in the child's arguments. */
+function flagValue(args: string[], flag: string): string | undefined {
+	const index = args.indexOf(flag);
+	return index === -1 ? undefined : args[index + 1];
+}
+
+test("spawn --agent starts the child with the agent file's model, thinking, tools, extensions, and instructions", async () => {
+	const guard = installGuard();
+	agentFile(join(agentDir(), "agents"), "implementer", ["description: Implements one ticket", "model: anthropic/claude-x", "thinking: high", "tools: read,bash", "extensions: /ext/a.ts", "mcp: false"], "Follow the brief.\n");
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "implementer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.equal(flagValue(args, "--provider"), "anthropic");
+	assert.equal(flagValue(args, "--model"), "claude-x");
+	assert.equal(flagValue(args, "--thinking"), "high");
+	assert.equal(flagValue(args, "--tools"), "read,bash");
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
+	assert.ok(args.includes("--no-mcp"));
+	assert.equal(args.at(-1), "Follow the brief.\n\nTask:\nhi");
+});
+
+test("a flag on spawn overrides the agent file", async () => {
+	agentFile(join(agentDir(), "agents"), "implementer", ["model: anthropic/claude-x", "thinking: high"]);
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "implementer", "--model", "x", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.equal(flagValue(args, "--model"), "x");
+	assert.equal(flagValue(args, "--thinking"), "high");
+});
+
+/** `runCli` from the directory `cwd`, as a parent Pi working in a project runs it. */
+function runCliIn(cwd: string, args: string[], env: NodeJS.ProcessEnv) {
+	return spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
+}
+
+test("a project agent file overrides a global one with the same name", async () => {
+	const project = join(root, "project");
+	agentFile(join(agentDir(), "agents"), "implementer", ["model: global-model"]);
+	agentFile(join(project, ".pi", "agents"), "implementer", ["model: project-model"]);
+
+	const result = runCliIn(project, ["spawn", "--agent", "implementer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(flagValue(await childArgs(agentDir()), "--model"), "project-model");
+});
+
+test("agents lists the name and description of each agent, a project one in place of a global one", () => {
+	const project = join(root, "project");
+	agentFile(join(agentDir(), "agents"), "reviewer", ["description: Reviews a change"]);
+	agentFile(join(agentDir(), "agents"), "implementer", ["description: Global implementer"]);
+	agentFile(join(project, ".pi", "agents"), "implementer", ["description: Implements one ticket"]);
+
+	const result = runCliIn(project, ["agents"], { PI_CODING_AGENT_DIR: agentDir() });
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "implementer  Implements one ticket\nreviewer  Reviews a change\n");
+});
+
+test("spawn --agent with an unknown name fails and starts nothing", () => {
+	agentFile(join(agentDir(), "agents"), "implementer", []);
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "nope", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 1);
+	assert.equal(result.stderr, "Unknown agent: nope (known: implementer; see `subagent agents`)\n");
+	assert.equal(existsSync(getRunsDir()), false);
+});
