@@ -581,12 +581,34 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
 });
 
-/** Install a fake command guard where `pi install npm:cc-safety-net` puts it. */
+/** Install a fake command guard where `pi install npm:cc-safety-net` puts it, and list it in Pi's packages. */
 function installGuard(): string {
 	const guard = join(agentDir(), "npm", "node_modules", "cc-safety-net");
 	mkdirSync(guard, { recursive: true });
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net@2.7.15"] }));
 	return guard;
 }
+
+test("spawn --extensions passes a command guard that Pi's packages list as a local path", async () => {
+	const guard = join(root, "checkouts", "cc-safety-net");
+	mkdirSync(guard, { recursive: true });
+	mkdirSync(agentDir());
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:other", { source: "../checkouts/cc-safety-net" }] }));
+
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, "");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
+});
+
+test("spawn --extensions warns when Pi's packages have no command guard, and starts the child", async () => {
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed in Pi's packages; the child runs without it\n");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
 
 test("spawn --extensions loads only the listed extensions, this extension, and the command guard", async () => {
 	const guard = installGuard();

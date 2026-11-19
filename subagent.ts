@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -41,13 +41,38 @@ const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high"
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
 const GUARD = "cc-safety-net";
 
+/** Where Pi keeps a package of its `settings.json`, after Pi's package manager: npm, git, or a local path. */
+function packagePath(source: string): string {
+	const agentDir = getAgentDir();
+	if (source.startsWith("npm:")) {
+		const spec = source.slice(4).trim();
+		const at = spec.indexOf("@", 1);
+		return join(agentDir, "npm", "node_modules", at === -1 ? spec : spec.slice(0, at));
+	}
+	const git = /^(?:git:|[a-z+]+:\/\/|git@)(?:[^@/]+@)?([^/:]+)[/:]([^@]+?)(?:\.git)?(?:@.*)?$/.exec(source);
+	if (git) return join(agentDir, "git", git[1], git[2]);
+	return resolve(agentDir, source.replace(/^~(?=\/|$)/, homedir()));
+}
+
 /**
- * The command guard as `pi install npm:cc-safety-net` installs it. A light child loads it unless the list
- * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: nothing to load.
+ * The command guard where Pi installed it from its `packages`. A light child loads it unless the list
+ * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: a warning, no guard.
  */
 function guardExtension(): string[] {
-	const path = join(getAgentDir(), "npm", "node_modules", GUARD);
-	return existsSync(path) ? [path] : [];
+	let packages: unknown = [];
+	try {
+		packages = (JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")) as { packages?: unknown }).packages;
+	} catch {
+		// No settings: no packages.
+	}
+	for (const entry of Array.isArray(packages) ? packages : []) {
+		const source: unknown = typeof entry === "string" ? entry : (entry as { source?: unknown } | null)?.source;
+		if (typeof source !== "string") continue;
+		const path = packagePath(source);
+		if (basename(path) === GUARD && existsSync(path)) return [path];
+	}
+	process.stderr.write(`Warning: the command guard ${GUARD} is not installed in Pi's packages; the child runs without it\n`);
+	return [];
 }
 
 /** Pi flags for a light child: this extension, the guard, then the listed ones. A local path is resolved here, not in `--cwd`. */
