@@ -5,7 +5,17 @@ description: Spawn and communicate with observable Pi subagents for second opini
 
 # Subagent
 
-Use the `subagent` CLI to delegate work to a separate Pi process with its own context and tmux session. Managed subagents cannot spawn nested subagents, and this skill is not loaded into their sessions.
+Delegate work to a separate Pi process with its own context and tmux session. Managed subagents cannot spawn nested subagents, and this skill is not loaded into their sessions.
+
+Use the `subagent` tool first. It works when the `subagent` CLI is not on `PATH`, and it returns what the CLI prints. Its `action` is `spawn`, `list`, `status`, `wait`, `send`, `stop`, `last`, or `agents`; its other fields are the CLI flags below in camel case:
+
+```json
+{ "action": "spawn", "name": "review", "tools": "read,grep,find,ls", "noMcp": true, "prompt": "Review the current diff" }
+{ "action": "send", "handle": "a1b2c3", "followUp": true, "message": "Also check the tests" }
+{ "action": "wait", "handle": "a1b2c3", "timeout": "600" }
+```
+
+`prompt` is one string; `files` is a list. Use the CLI second: when the tool is not available, and for `rename` and `interrupt`, which only the CLI has. Never run `node …/subagent.ts`. The examples below show the CLI; the same rules apply to the tool.
 
 ## Spawn
 
