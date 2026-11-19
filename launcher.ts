@@ -1,4 +1,4 @@
-// Runs as the child's tmux pane command: restore the caller's environment saved by `launchRun`, then become pi.
+// Runs as the child's tmux pane command: restore the caller's environment saved by `prepareLaunch`, then become pi.
 import { readFileSync, rmSync } from "node:fs";
 import { TMUX_PANE_VARIABLES } from "./shared.ts";
 

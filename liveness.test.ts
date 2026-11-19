@@ -100,6 +100,27 @@ test("a dead child, and a child whose process ID now belongs to another process,
 	assert.deepEqual(tmuxCalls(), []);
 });
 
+test("a parent with 2 starting children runs 10 widget and result ticks and starts no tmux", () => {
+	// `spawn` and resume write `childPid: null` until the new child records its ID.
+	storedRun("ggg777", { state: "starting", childPid: null });
+	storedRun("hhh888", { state: "starting", childPid: null });
+
+	for (let i = 0; i < 10; i++) assert.deepEqual(tick(), { states: ["starting", "starting"], results: undefined });
+
+	assert.deepEqual(tmuxCalls(), []);
+});
+
+test("a starting child that records no process ID within its grace time is reported as exited, with no tmux", () => {
+	const longAgo = new Date(Date.now() - 31_000).toISOString();
+	storedRun("iii999", { state: "starting", childPid: null, updatedAt: longAgo });
+
+	const { states, results } = tick();
+
+	assert.deepEqual(states, ["exited"]);
+	assert.match(results ?? "", /^Subagent iii999 exited\n/);
+	assert.deepEqual(tmuxCalls(), []);
+});
+
 test("a run from before the child recorded its process ID still asks tmux", () => {
 	const old = storedRun("fff666");
 

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, markExitKnown, markWaiting, stopTimedOutRuns, timedOutText } from "./outbox.ts";
+import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
+import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText } from "./queue.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -15,12 +16,9 @@ import {
 	getRunsDir,
 	inboxDir,
 	inboxHasMessages,
-	launchRun,
 	listRuns,
-	mustQueue,
 	prepareLaunch,
 	parseDuration,
-	queueSuspendedRun,
 	readLatestAssistant,
 	readMetadata,
 	removeRunDir,
@@ -28,8 +26,6 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
-	runLimit,
-	startLaunch,
 	tmuxSessionExists,
 	turnOutcome,
 	updateMetadata,
@@ -41,13 +37,38 @@ const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high"
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
 const GUARD = "cc-safety-net";
 
+/** Where Pi keeps a package of its `settings.json`, after Pi's package manager: npm, git, or a local path. */
+function packagePath(source: string): string {
+	const agentDir = getAgentDir();
+	if (source.startsWith("npm:")) {
+		const spec = source.slice(4).trim();
+		const at = spec.indexOf("@", 1);
+		return join(agentDir, "npm", "node_modules", at === -1 ? spec : spec.slice(0, at));
+	}
+	const git = /^(?:git:|[a-z+]+:\/\/|git@)(?:[^@/]+@)?([^/:]+)[/:]([^@]+?)(?:\.git)?(?:@.*)?$/.exec(source);
+	if (git) return join(agentDir, "git", git[1], git[2]);
+	return resolve(agentDir, source.replace(/^~(?=\/|$)/, homedir()));
+}
+
 /**
- * The command guard as `pi install npm:cc-safety-net` installs it. A light child loads it unless the list
- * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: nothing to load.
+ * The command guard where Pi installed it from its `packages`. A light child loads it unless the list
+ * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: a warning, no guard.
  */
 function guardExtension(): string[] {
-	const path = join(getAgentDir(), "npm", "node_modules", GUARD);
-	return existsSync(path) ? [path] : [];
+	let packages: unknown = [];
+	try {
+		packages = (JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")) as { packages?: unknown }).packages;
+	} catch {
+		// No settings: no packages.
+	}
+	for (const entry of Array.isArray(packages) ? packages : []) {
+		const source: unknown = typeof entry === "string" ? entry : (entry as { source?: unknown } | null)?.source;
+		if (typeof source !== "string") continue;
+		const path = packagePath(source);
+		if (basename(path) === GUARD && existsSync(path)) return [path];
+	}
+	process.stderr.write(`Warning: the command guard ${GUARD} is not installed in Pi's packages; the child runs without it\n`);
+	return [];
 }
 
 /** Pi flags for a light child: this extension, the guard, then the listed ones. A local path is resolved here, not in `--cwd`. */
@@ -121,7 +142,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 /**
- * The worktree `~/WORK/dev/.worktrees/<repo>/<topic>` on branch `<topic>`, made from `base`.
+ * The worktree `<root>/<repo>/<topic>` on branch `<topic>`, made from `base`. The root is
+ * `PI_SUBAGENT_WORKTREE_ROOT`, else `~/WORK/dev/.worktrees`, as the spec asks.
  * An existing path is reused only when it is a clean worktree of that branch, so no work is lost.
  */
 function prepareWorktree(repoDir: string, topic: string, base: string | undefined): string {
@@ -129,7 +151,8 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 	if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(topic)) fail(`Invalid worktree topic: ${topic}`);
 	// The common Git directory sits in the main checkout, so every worktree of a repository maps to one <repo>.
 	const commonDir = git(repoDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-	const path = join(homedir(), "WORK", "dev", ".worktrees", basename(dirname(commonDir)), topic);
+	const worktreeRoot = process.env.PI_SUBAGENT_WORKTREE_ROOT || join(homedir(), "WORK", "dev", ".worktrees");
+	const path = join(resolve(worktreeRoot), basename(dirname(commonDir)), topic);
 	if (existsSync(path)) {
 		const check = (args: string[]) => spawnSync("git", args, { cwd: path, encoding: "utf8" }).stdout?.trim();
 		const reusable =
@@ -289,8 +312,7 @@ function spawnSubagent(callerArgs: string[]): void {
 	if (noContextFiles) launchArgs.push("--no-context-files");
 
 	const parentSessionId = process.env.PI_SESSION_ID || undefined;
-	// Only a parent Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
-	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && parentSessionId !== undefined && mustQueue(listRuns(parentSessionId));
+	const queued = mustQueue(parentSessionId);
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
@@ -300,6 +322,7 @@ function spawnSubagent(callerArgs: string[]): void {
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
+		childPid: null,
 		tmuxSession,
 		runDir,
 		sessionFile,
@@ -321,8 +344,8 @@ function spawnSubagent(callerArgs: string[]): void {
 	const firstPrompt = [instructions, task].filter(Boolean).join("\n\n");
 	if (firstPrompt) initialArgs.push(firstPrompt);
 	try {
-		if (queued) prepareLaunch(metadata, initialArgs);
-		else launchRun(metadata, initialArgs);
+		prepareLaunch(metadata, initialArgs);
+		if (!queued) startRun(metadata);
 	} catch (error) {
 		removeRunDir(runDir);
 		throw error;
@@ -335,7 +358,7 @@ function spawnSubagent(callerArgs: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 
@@ -459,27 +482,15 @@ function resumeSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	if (!metadata.suspended || metadata.state === "queued" || tmuxSessionExists(metadata.tmuxSession)) fail(`${metadata.handle} is not suspended`);
-	const session = metadata.parentSessionId;
 	// Only the tick of the parent session's own Pi starts its queued runs.
-	const queued = process.env.PI_SUBAGENT_QUEUE === "1" && session !== undefined && session === process.env.PI_SESSION_ID && mustQueue(listRuns(session));
+	const queued = metadata.parentSessionId === process.env.PI_SESSION_ID && mustQueue(metadata.parentSessionId);
 	// This caller is the parent now, as for `spawn`, so the orphan sweep follows it.
 	const prepared = queueSuspendedRun(metadata, {
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
 	});
-	if (!queued) {
-		const starting = updateMetadata(prepared.runDir, { state: "starting" }) ?? prepared;
-		try {
-			startLaunch(starting);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateMetadata(prepared.runDir, { state: "error", error: message });
-			fail(message);
-		}
-	}
-	process.stdout.write(
-		`Resumed ${runDisplayName(metadata)}\nState: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
-	);
+	if (!queued) startRun(prepared);
+	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
 }
 
 function lastSubagent(args: string[]): void {

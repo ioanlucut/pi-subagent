@@ -12,10 +12,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
-import { runSubagentTool } from "./tool.ts";
+import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { resumeSuspendedRuns, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -26,9 +27,8 @@ import {
 	pruneStaleRuns,
 	readMetadata,
 	removeRunDir,
-	resumeSuspendedRuns,
-	startQueuedRuns,
 	suspendOrphanedRuns,
+	suspendSessionRuns,
 	suspendRuns,
 	tmuxSessionExists,
 	updateMetadata,
@@ -60,14 +60,14 @@ afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-/** Write an executable `pi` that records what it received, then stays alive like a real child. */
+/** Write an executable `pi` that records what it received and, like a real child, its process ID, then stays alive. */
 function fakePi(dir: string): string {
 	mkdirSync(dir, { recursive: true });
 	const script = join(dir, "pi");
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst metadata = join(process.env.PI_SUBAGENT_RUN_DIR, "metadata.json");\nfs.writeFileSync(metadata + ".pi", JSON.stringify({ ...JSON.parse(fs.readFileSync(metadata, "utf8")), childPid: process.pid }));\nfs.renameSync(metadata + ".pi", metadata);\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;
@@ -443,7 +443,7 @@ test("spawn tells the agent not to wait only when the parent delivers results", 
 	assert.match(notified.stdout, /\nResult: arrives as a message when the turn ends\. Do not run `subagent wait`\.\n$/);
 });
 
-/** A tmux session started the way `launchRun` starts a child, for the run directory `runDir`. */
+/** A tmux session started the way `startLaunch` starts a child, for the run directory `runDir`. */
 function childSession(name: string, runDir: string): void {
 	const result = spawnSync("tmux", ["new-session", "-d", "-s", name, "--", "/bin/sh", "-c", "sleep 60", "launch", join(runDir, "launch.json")]);
 	assert.equal(result.status, 0, String(result.stderr));
@@ -530,6 +530,20 @@ test("stop prints where the transcript went", () => {
 	assert.match(result.stdout, /^Stopped tra333\nTranscript: .*--repo-my-app--\/2026-11-12T10-00-00-123Z_child-session\.jsonl \(`pi --resume` in \/repo\/my-app\)\n$/);
 });
 
+test("after stop, the answer file named in the parent's message still exists, beside the kept transcript", () => {
+	const runDir = transcriptRun("tra444", "/repo/my-app");
+	updateMetadata(runDir, { parentSessionId: "parent" });
+	reportSettledTurn(runDir);
+	const [run] = listRuns("parent");
+	const file = /\[The whole answer: (\S+)\]$/.exec(pendingResults([run])?.text ?? "")?.[1];
+
+	const result = runCli(["stop", "tra444"], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(file, join(agentDir(), "sessions", "--repo-my-app--", "2026-11-12T10-00-00-123Z_child-session.answers", basename(file ?? "")));
+	assert.equal(readFileSync(file ?? "", "utf8"), "Done.");
+});
+
 test("last prints the latest answer and the state, without waiting", () => {
 	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
 	const [run] = listRuns();
@@ -566,12 +580,34 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
 });
 
-/** Install a fake command guard where `pi install npm:cc-safety-net` puts it. */
+/** Install a fake command guard where `pi install npm:cc-safety-net` puts it, and list it in Pi's packages. */
 function installGuard(): string {
 	const guard = join(agentDir(), "npm", "node_modules", "cc-safety-net");
 	mkdirSync(guard, { recursive: true });
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net@2.7.15"] }));
 	return guard;
 }
+
+test("spawn --extensions passes a command guard that Pi's packages list as a local path", async () => {
+	const guard = join(root, "checkouts", "cc-safety-net");
+	mkdirSync(guard, { recursive: true });
+	mkdirSync(agentDir());
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:other", { source: "../checkouts/cc-safety-net" }] }));
+
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, "");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
+});
+
+test("spawn --extensions warns when Pi's packages have no command guard, and starts the child", async () => {
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed in Pi's packages; the child runs without it\n");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
 
 test("spawn --extensions loads only the listed extensions, this extension, and the command guard", async () => {
 	const guard = installGuard();
@@ -692,6 +728,21 @@ test("spawn --worktree reuses a clean worktree of the same branch, and refuses o
 	assert.equal(readFileSync(join(worktree, "wip.txt"), "utf8"), "work\n");
 });
 
+test("PI_SUBAGENT_WORKTREE_ROOT moves the worktree root", async () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(root, "trees", "repo", "t1");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "t1", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+		PI_SUBAGENT_WORKTREE_ROOT: join(root, "trees"),
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "t1");
+	assert.equal((await childEnv(agentDir())).get("PWD"), worktree);
+});
+
 test("stop leaves the worktree and its branch", () => {
 	const { repo, home } = gitRepo();
 	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "t1");
@@ -732,7 +783,7 @@ async function startedChild(run: { runDir: string }): Promise<string> {
 }
 
 /** The parent tick, in a Pi started with a limit of 2. */
-const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => startQueuedRuns("parent", (_run, error) => assert.fail(error)));
+const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, error) => assert.fail(error)));
 
 test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () => {
 	const outputs = spawnMany(3, queueEnv);
@@ -742,6 +793,18 @@ test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () =>
 	assert.match(outputs[2], /^Spawned c2 \(\w+\)\nState: queued, starts when fewer than 2 children run\n/);
 	await tick();
 	assert.equal(byName("c2").state, "queued", "no slot is free");
+});
+
+test("subagentLimit in Pi's settings limits a session to 2 children, and PI_SUBAGENT_LIMIT overrides it", () => {
+	mkdirSync(agentDir(), { recursive: true });
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ subagentLimit: 2 }));
+
+	const outputs = spawnMany(3, { PI_SESSION_ID: "parent", PI_SUBAGENT_QUEUE: "1" });
+	assert.deepEqual(listRuns().map((run) => run.state), ["starting", "starting", "queued"]);
+	assert.match(outputs[2], /\nState: queued, starts when fewer than 2 children run\n/);
+
+	const [override] = spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "9" });
+	assert.match(override, /\nState: queued, starts when fewer than 9 children run\n/, "older children wait, so it queues");
 });
 
 test("when a child ends, the next tick starts the queued child with the caller's environment and its prompt", async () => {
@@ -827,6 +890,23 @@ test("a child suspended 25 hours ago stays suspended after resume, and list show
 	assert.match(runCli(["status", byName("c0").handle], {}).stdout, /^c0 \(\w+\): suspended /);
 });
 
+test("a queued child is suspended when its parent quits: after 25 h it stays suspended, and a recent one starts with its prompt", async () => {
+	spawnMany(4, queueEnv);
+	await suspendSessionRuns("parent");
+	updateMetadata(byName("c2").runDir, { suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+
+	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+
+	assert.equal(tmuxSessionExists(byName("c2").tmuxSession), false);
+	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c2 \(\w+\)  suspended  /m);
+	assert.equal(byName("c3").state, "queued", "behind the limit");
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+	assert.equal(byName("c3").state, "starting");
+	await startedChild(byName("c3"));
+	assert.equal(JSON.parse(readFileSync(join(byName("c3").runDir, "argv"), "utf8")).at(-1), "Task:\ntask 3");
+});
+
 /** A child of session `parent` suspended 25 hours ago, so resuming the session leaves it suspended. */
 async function oldSuspendedChild(): Promise<string> {
 	spawnMany(1, { PI_SESSION_ID: "parent" });
@@ -849,6 +929,20 @@ test("subagent resume queues a suspended child, and it starts when a slot is fre
 	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
 	await tick();
 	assert.equal(byName("old").state, "starting");
+	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
+});
+
+test("the subagent tool resumes a suspended child, as the CLI does", async () => {
+	assert.ok((TOOL_ACTIONS as readonly string[]).includes("resume"), "the model can choose the action");
+	const handle = await oldSuspendedChild();
+
+	let result = { text: "", isError: true };
+	await withEnv({ PATH: `${join(root, "bin")}:${basePath}` }, async () => {
+		result = await runSubagentTool({ action: "resume", handle }, toolContext("parent"));
+	});
+
+	assert.equal(result.isError, false, result.text);
+	assert.match(result.text, /^Resumed old \(\w+\)\nState: busy\n/);
 	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
 });
 

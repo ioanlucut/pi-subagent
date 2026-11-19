@@ -51,7 +51,7 @@ subagent wait a1b2c3    # blocks until the child is idle, then prints its final 
 subagent stop a1b2c3    # removes the child and its tmux session; keeps its transcript
 ```
 
-The model can do the same with the `subagent` tool, for example `{ "action": "spawn", "name": "review", "tools": "read,grep,find,ls", "prompt": "Review the current diff independently" }`. The tool runs the CLI that ships with the extension and returns what the CLI prints; it takes the parent session, provider, model, thinking level, and directory from Pi, as the bash tool does. Its actions are `spawn`, `list`, `status`, `wait`, `send`, `stop`, `last`, and `agents`, and its fields are the spawn options in camel case (`noMcp` for `--no-mcp`, `files` for `--file`). `rename` and `interrupt` stay CLI only.
+The model can do the same with the `subagent` tool, for example `{ "action": "spawn", "name": "review", "tools": "read,grep,find,ls", "prompt": "Review the current diff independently" }`. The tool runs the CLI that ships with the extension and returns what the CLI prints; it takes the parent session, provider, model, thinking level, and directory from Pi, as the bash tool does. Its actions are `spawn`, `list`, `status`, `wait`, `send`, `stop`, `resume`, `last`, and `agents`, and its fields are the spawn options in camel case (`noMcp` for `--no-mcp`, `files` for `--file`). `rename` and `interrupt` stay CLI only.
 
 Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the parent session, provider, model, and thinking level that `spawn` reads. A `!` command or another terminal does not: there `spawn` fails unless you pass `--provider` and `--model`, the child has no parent session, so it is never suspended or resumed, and `subagent list` shows the children of all sessions. Stop such children yourself.
 
@@ -82,7 +82,7 @@ Below the Pi editor, each child has one row: its state, name, time in the curren
 
 ### At most 4 children run at once
 
-In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. Set `PI_SUBAGENT_LIMIT` before you start Pi to change the limit. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
+In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. To change the limit, set `subagentLimit` in `~/.pi/agent/settings.json` (`{ "subagentLimit": 2 }`); `PI_SUBAGENT_LIMIT`, set before you start Pi, overrides it. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
 
 ### Results arrive as messages
 
@@ -94,7 +94,7 @@ Subagent review-spec (a1b2c3) finished
 <the child's answer>
 ```
 
-The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). An answer longer than 2,000 characters arrives as its first 2,000 characters and the path of a file in the run directory that holds it whole; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
+The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). Each answer ends with the path of a file that holds it whole, beside the place `stop` keeps the transcript (`<time>_<id>.answers/` in Pi's sessions), so the path stays valid after `stop`. An answer longer than 2,000 characters arrives as its first 2,000 characters and that path; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
 
 Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print and JSON modes end with the turn, so there the agent uses `wait`.
 
@@ -117,14 +117,14 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--provider`, `--model`                | the parent's                                         | Pick another model. Required for independent opinions.                                |
 | `--thinking <level>`                   | the parent's, else `medium`                          | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.                            |
 | `--cwd <dir>`                          | current directory                                    | Where the child works.                                                                |
-| `--worktree <topic>`                   | off                                                  | Create `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` and work there. Reuses a clean worktree of that branch; fails if the path has other work. `stop` keeps it. |
+| `--worktree <topic>`                   | off                                                  | Create `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` and work there. Set `PI_SUBAGENT_WORKTREE_ROOT` to use another root than `~/WORK/dev/.worktrees`. Reuses a clean worktree of that branch; fails if the path has other work. `stop` keeps it. |
 | `--base <branch>`                      | the current branch                                   | With `--worktree`: where the new branch starts.                                       |
 | `--tools <names>`                      | Pi's default tools (`read`, `bash`, `edit`, `write`) | Comma-separated allowlist. `read,grep,find,ls` is read-only. `bash` can change files. |
 | `--prompt <text>`                      |                                                      | Repeatable. All prompts go into the first turn.                                       |
 | `--file <path>`                        |                                                      | Repeatable. Attached to the first turn.                                               |
 | `--no-context-files`                   | off                                                  | Ignore `AGENTS.md` and `CLAUDE.md`, for a review those must not bias.                 |
 | `--no-extensions`                      | off                                                  | No extensions except the subagent control bridge.                                     |
-| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net`; `-cc-safety-net` in the list drops the guard. |
+| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard. When `packages` has no guard, `spawn` prints a warning. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
 | `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch. Past it, the child is stopped and reported as `timed out`; its run and transcript stay. |
@@ -251,7 +251,7 @@ The child works in `~/WORK/dev/.worktrees/my-app/17_login` on branch `17_login`.
 | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | The child finishes its turn                                            | It stays `idle` and keeps its context, ready for `send`.                                                                                |
 | `/reload` in the parent                                                | Nothing. Children keep running.                                                                                                         |
-| The parent quits or switches session                                   | Running children are suspended: the process stops, transcript and metadata stay. Children that already exited on their own are removed. |
+| The parent quits or switches session                                   | Running and queued children are suspended: the process stops, transcript and metadata stay. Children that already exited on their own are removed. |
 | The parent dies without quitting                                       | The next Pi to start, in any session, suspends them.                                                                                    |
 | The parent session starts again (`pi --resume`, `pi --session <file>`) | Children suspended in the last 24 h start again through the queue, idle, with their full history. Older ones stay suspended until `subagent resume`. |
 | `subagent stop`                                                        | Removed: tmux session and metadata. A transcript with an answer is copied first, see below.                                             |
@@ -269,17 +269,17 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
    │                                            session.jsonl   the child's transcript
    │                                            inbox/          messages from `send`
    │                                            outbox/         results for the parent
-   │                                            answers/        long answers, whole
+   │                                            answers/        answers, before the transcript has a header
    │
    └─ extension: child rows, /subagent,        tmux session pi-subagent-<handle>
       suspend and resume                         └─ launcher.ts ─► pi (the child)
 ```
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
-- `tool.ts` is the `subagent` model tool. It runs `subagent.ts` with the session, model, and directory from Pi's tool context, so the tool and the CLI share one code path.
+- `tool.ts` is the `subagent` model tool, with its parameters in `tool-schema.ts`. It runs `subagent.ts` with the session, model, and directory from Pi's tool context, so the tool and the CLI share one code path.
 - `index.ts` is the extension. In the parent it shows one row per child, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date, with the child's process ID and start time.
 - `tick.ts` is the parent's one tick for the rows, the Herdr panes, the results, the time limits, and the queue. It runs each second only while the session has a child (queued ones included) or a result to send; it starts again when a tool call (`subagent spawn`) ends. A session with no children does no subagent work.
-- Each second the parent checks whether each child runs from that process ID (`kill(pid, 0)`), with no program started; `ps` checks the start time once per child, so a reused ID does not count. On a busy macOS any program start can take a second, and these checks run on Pi's UI thread. A run from before this change, with no process ID, still asks tmux.
+- Each second the parent checks whether each child runs from that process ID (`kill(pid, 0)`), with no program started; `ps` checks the start time once per child, so a reused ID does not count. On a busy macOS any program start can take a second, and these checks run on Pi's UI thread. A child that has not recorded its process ID yet counts as running for 30 s after its launch, and as exited after that, also with no program started. Only a run made by an older version, which has no process ID field, still asks tmux. A child stopped at its time limit costs one `tmux kill-session`, once.
 - `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
 - `widget.ts` reads each child's transcript for the rows: last action, tokens, cost.
 - `outbox.ts` is the way back: the child writes each turn's result to `outbox/`, and the parent extension puts it into the chat and deletes the file.

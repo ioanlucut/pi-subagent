@@ -29,8 +29,11 @@ export interface RunMetadata {
 	/** Start time of the parent pi (`ps -o lstart`), so a reused process ID does not count as the parent. */
 	parentStarted?: string;
 	childSessionId?: string;
-	/** Process ID of the child pi, written by the child when its session starts. */
-	childPid?: number;
+	/**
+	 * Process ID of the child pi, written by the child when its session starts. `null` until then; a run
+	 * with no field at all is from a version before this one, and only tmux knows whether it runs.
+	 */
+	childPid?: number | null;
 	/** Start time of the child pi (`ps -o lstart`), so a reused process ID does not count as the child. */
 	childStarted?: string;
 	tmuxSession: string;
@@ -223,24 +226,29 @@ function sessionDirFor(cwd: string): string {
 }
 
 /**
- * Remove a run. A transcript with an answer is first copied into Pi's sessions for the child's working
- * directory, named as Pi names it, so `pi --resume` there lists it. Returns that path.
+ * Where a transcript is kept when its run is removed: Pi's sessions for the child's working directory, named
+ * as Pi names it, so `pi --resume` there lists it. Undefined when the transcript has no session header yet.
  */
+export function keptTranscriptPath(sessionFile: string): string | undefined {
+	try {
+		const [header] = readFileSync(sessionFile, "utf8").split("\n", 1);
+		const session = JSON.parse(header) as { type?: unknown; id?: unknown; timestamp?: unknown; cwd?: unknown };
+		if (session.type !== "session" || typeof session.id !== "string" || typeof session.cwd !== "string" || typeof session.timestamp !== "string") return undefined;
+		return join(sessionDirFor(session.cwd), `${session.timestamp.replace(/[:.]/g, "-")}_${session.id}.jsonl`);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Remove a run. A transcript with an answer is first copied to `keptTranscriptPath`. Returns that path. */
 export function removeRunDir(runDir: string): string | undefined {
 	let kept: string | undefined;
 	const metadata = readMetadata(runDir);
-	try {
-		const [header] = readFileSync(metadata?.sessionFile ?? "", "utf8").split("\n", 1);
-		const session = JSON.parse(header) as { type?: unknown; id?: unknown; timestamp?: unknown; cwd?: unknown };
-		if (metadata && readLatestAssistant(metadata.sessionFile) && session.type === "session" && typeof session.id === "string" && typeof session.cwd === "string" && typeof session.timestamp === "string") {
-			const dir = sessionDirFor(session.cwd);
-			mkdirSync(dir, { recursive: true, mode: 0o700 });
-			const target = join(dir, `${session.timestamp.replace(/[:.]/g, "-")}_${session.id}.jsonl`);
-			copyFileSync(metadata.sessionFile, target);
-			kept = target;
-		}
-	} catch {
-		// No transcript or no header: nothing to keep.
+	const target = metadata && keptTranscriptPath(metadata.sessionFile);
+	if (metadata && target && readLatestAssistant(metadata.sessionFile)) {
+		mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+		copyFileSync(metadata.sessionFile, target);
+		kept = target;
 	}
 	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	return kept;
@@ -264,15 +272,9 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 	return file;
 }
 
-/** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
-export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
-	prepareLaunch(metadata, initialArgs);
-	startLaunch(metadata);
-}
-
 /**
- * Save the launch of a run without starting it, for a queued run: the parent tick starts it later
- * with `startLaunch`, and the child still gets the environment of the `spawn` caller.
+ * Save the launch of a run for `startLaunch`, now or, for a queued run, later from the parent tick: the
+ * child still gets the environment of the `spawn` caller. `initialArgs` are only passed on first spawn.
  */
 export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
 	// A file in the working directory must not choose the program: a cloned repository could.
@@ -334,6 +336,14 @@ export function startLaunch(metadata: RunMetadata): void {
 	}
 }
 
+/** tmux starts just after the metadata is written; a run this young whose child has not recorded its ID has not died. */
+export const STARTING_GRACE_MS = 30_000;
+
+/** Whether a `starting` run is still in its grace time, so a child with no process ID yet is not dead. */
+export function inStartingGrace(metadata: RunMetadata): boolean {
+	return metadata.state === "starting" && Date.now() - Date.parse(metadata.updatedAt) < STARTING_GRACE_MS;
+}
+
 /** Verdicts on (process ID, start time) pairs, so `ps` runs once per child and not on each tick. */
 const checkedChildren = new Map<string, boolean>();
 
@@ -341,11 +351,13 @@ const checkedChildren = new Map<string, boolean>();
  * Whether the run's child process runs, with no program started in the normal case: the widget and
  * result ticks call this each second on Pi's UI thread, where one `tmux` call can take 2 s on a busy
  * machine. A process ID can be reused, so the start time is checked once with `ps`; an ID once found
- * dead stays dead. Runs from before the child recorded its process ID still ask tmux.
+ * dead stays dead. A child that has not recorded its ID yet lives while it is in its grace time. Only a
+ * run from an older version, with no `childPid` field, asks tmux.
  */
 function childIsAlive(metadata: RunMetadata): boolean {
 	const pid = metadata.childPid;
 	if (pid === undefined) return tmuxSessionExists(metadata.tmuxSession);
+	if (pid === null) return inStartingGrace(metadata);
 	const key = `${pid} ${metadata.childStarted}`;
 	if (checkedChildren.get(key) === false || !processExists(pid)) {
 		checkedChildren.set(key, false);
@@ -360,14 +372,13 @@ function childIsAlive(metadata: RunMetadata): boolean {
 	return started === metadata.childStarted;
 }
 
+/** Whether a run in this state holds a slot: started, and not known to have ended. */
+export function isLive(state: RunState): boolean {
+	return state === "starting" || state === "busy" || state === "idle";
+}
+
 export function effectiveRunState(metadata: RunMetadata): RunState {
-	if (
-		(metadata.state === "starting" || metadata.state === "busy" || metadata.state === "idle") &&
-		!childIsAlive(metadata)
-	) {
-		return "exited";
-	}
-	return metadata.state;
+	return isLive(metadata.state) && !childIsAlive(metadata) ? "exited" : metadata.state;
 }
 
 export function listRuns(parentSessionId?: string): RunMetadata[] {
@@ -451,11 +462,29 @@ export function assistantText(message: AssistantMessage): string {
 /** Stop running children but keep transcript and metadata, so resuming the parent session relaunches them. */
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	for (const run of runs) {
-		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString() });
+		// A child that has not recorded its process ID never writes `exited`: the parent marks it, so it is not alive in its grace time.
+		const unstarted = readMetadata(run.runDir)?.childPid === null;
+		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString(), ...(unstarted && { state: "exited" as const }) });
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
 	await Promise.all(runs.map((run) => waitForRunShutdown(run.runDir)));
+}
+
+/**
+ * The parent quits or leaves the session: suspend its running and queued children, so resuming the session
+ * starts them again within 24 h; remove those that already exited on their own.
+ */
+export async function suspendSessionRuns(sessionId: string): Promise<void> {
+	const running: RunMetadata[] = [];
+	for (const run of listRuns(sessionId)) {
+		if (run.state === "queued") {
+			// Never started: its saved launch keeps the first prompt for resume.
+			updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() });
+		} else if (tmuxSessionExists(run.tmuxSession)) running.push(run);
+		else if (!run.suspended) removeRunDir(run.runDir);
+	}
+	await suspendRuns(running);
 }
 
 /** Suspend running children whose parent process died without its shutdown handler (crash, kill -9, lost terminal). */
@@ -518,82 +547,4 @@ export function pruneStaleRuns(): void {
 	for (const run of listRuns()) {
 		if (Date.parse(run.updatedAt) < cutoff && !tmuxSessionExists(run.tmuxSession)) removeRunDir(run.runDir);
 	}
-}
-
-/** Children that may run at once in one parent session: `PI_SUBAGENT_LIMIT`, default 4. */
-export function runLimit(): number {
-	const limit = Number(process.env.PI_SUBAGENT_LIMIT);
-	return Number.isInteger(limit) && limit > 0 ? limit : 4;
-}
-
-/** Whether a new child of these runs must queue: the limit is reached, or older children wait. */
-export function mustQueue(runs: RunMetadata[]): boolean {
-	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
-}
-
-/** Children that hold a slot: started, and their process not known to have ended. */
-function liveRunCount(runs: RunMetadata[]): number {
-	return runs.filter((run) => ["starting", "busy", "idle"].includes(effectiveRunState(run))).length;
-}
-
-/** The parent tick: start the session's queued runs, oldest first, while fewer than the limit run. */
-export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
-	const runs = listRuns(sessionId);
-	// No queued run: no liveness check, so the tick costs only the listing.
-	if (!runs.some((run) => run.state === "queued")) return;
-	let free = runLimit() - liveRunCount(runs);
-	for (const run of runs) {
-		if (free <= 0) return;
-		if (run.state !== "queued") continue;
-		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
-		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: processStartTime(process.pid) });
-		// `stop` removed the run since the listing.
-		if (!starting) continue;
-		free--;
-		try {
-			startLaunch(starting);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			updateMetadata(run.runDir, { state: "error", error: message });
-			onError(run, message);
-		}
-	}
-}
-
-const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Put a suspended run in the queue, with the caller's environment for its launch. It stays `suspended`
- * until its child starts, so a launch that fails is tried again on the next resume.
- */
-export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata {
-	const queued =
-		updateMetadata(run.runDir, {
-			...patch,
-			state: "queued",
-			error: undefined,
-			// The old process is gone; until the new one records its ID, tmux tells whether it runs.
-			childPid: undefined,
-			childStarted: undefined,
-		}) ?? run;
-	prepareLaunch(queued);
-	return queued;
-}
-
-/**
- * Queue the session's children suspended in the last 24 h, then start as many as the limit allows: resuming
- * a session with 6 children must not start 6 Pi at once. Older ones stay suspended; `subagent resume` starts
- * one by hand. `onError` gets each run that could not start.
- */
-export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
-	for (const run of listRuns(sessionId)) {
-		if (!run.suspended || run.state === "queued" || tmuxSessionExists(run.tmuxSession)) continue;
-		if (!existsSync(run.sessionFile)) {
-			removeRunDir(run.runDir);
-			continue;
-		}
-		if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) > RESUME_WINDOW_MS) continue;
-		queueSuspendedRun(run);
-	}
-	startQueuedRuns(sessionId, onError);
 }

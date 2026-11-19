@@ -31,14 +31,17 @@ function storedRun(handle: string, message?: Record<string, unknown>, patch: Par
 
 const answer = (text: string) => ({ content: [{ type: "text", text }], stopReason: "stop" });
 
+/** The message text with each answer file path as `<file>`. */
+const withoutPaths = (text = "") => text.replace(/The whole answer: \S+\]/g, "The whole answer: <file>]");
+
 test("a settled turn reaches the parent once, as a message with the child's answer", () => {
 	const run = storedRun("aaa111", answer("All good."), { name: "review" });
 
 	reportSettledTurn(run.runDir);
 	const pending = pendingResults([run]);
 
-	assert.equal(pending?.text, "Subagent review (aaa111) finished\n\nAll good.");
-	for (const file of pending.files) rmSync(file);
+	assert.equal(withoutPaths(pending?.text), "Subagent review (aaa111) finished\n\nAll good.\n\n[The whole answer: <file>]");
+	for (const file of pending?.files ?? []) rmSync(file);
 	assert.equal(pendingResults([run]), undefined);
 });
 
@@ -47,7 +50,7 @@ test("a turn that ended in a provider error is reported as failed, not finished"
 
 	reportSettledTurn(run.runDir);
 
-	assert.equal(pendingResults([run])?.text, "Subagent bbb222 failed (error)\n\nOAuth refresh failed");
+	assert.equal(withoutPaths(pendingResults([run])?.text), "Subagent bbb222 failed (error)\n\nOAuth refresh failed\n\n[The whole answer: <file>]");
 });
 
 test("a long answer reaches the parent as a summary with the path of a file that holds it whole", () => {
@@ -63,13 +66,14 @@ test("a long answer reaches the parent as a summary with the path of a file that
 	assert.equal(readFileSync(match[1], "utf8"), full);
 });
 
-test("a short answer reaches the parent whole, with no file", () => {
+test("a short answer reaches the parent whole, with the path of a file that holds it", () => {
 	const run = storedRun("stu888", answer("c".repeat(2_000)));
 
 	reportSettledTurn(run.runDir);
 
-	assert.equal(pendingResults([run])?.text, `Subagent stu888 finished\n\n${"c".repeat(2_000)}`);
-	assert.equal(existsSync(join(run.runDir, "answers")), false);
+	const match = pendingResults([run])?.text.match(/^Subagent stu888 finished\n\nc{2000}\n\n\[The whole answer: (\S+)\]$/);
+	assert.ok(match);
+	assert.equal(readFileSync(match[1], "utf8"), "c".repeat(2_000));
 });
 
 test("a turn with a queued `send` is not reported: the next turn has the result", () => {
@@ -95,7 +99,10 @@ test("results of several children arrive as one message", () => {
 	reportSettledTurn(first.runDir);
 	reportSettledTurn(second.runDir);
 
-	assert.equal(pendingResults([first, second])?.text, "Subagent eee555 finished\n\nOne.\n\n---\n\nSubagent fff666 finished\n\nTwo.");
+	assert.equal(
+		withoutPaths(pendingResults([first, second])?.text),
+		"Subagent eee555 finished\n\nOne.\n\n[The whole answer: <file>]\n\n---\n\nSubagent fff666 finished\n\nTwo.\n\n[The whole answer: <file>]",
+	);
 });
 
 test("a child whose process ended without `stop` is reported once", () => {

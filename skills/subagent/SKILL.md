@@ -7,7 +7,7 @@ description: Spawn and communicate with observable Pi subagents for second opini
 
 Delegate work to a separate Pi process with its own context and tmux session. Managed subagents cannot spawn nested subagents, and this skill is not loaded into their sessions.
 
-Use the `subagent` tool first. It works when the `subagent` CLI is not on `PATH`, and it returns what the CLI prints. Its `action` is `spawn`, `list`, `status`, `wait`, `send`, `stop`, `last`, or `agents`; its other fields are the CLI flags below in camel case:
+Use the `subagent` tool first. It works when the `subagent` CLI is not on `PATH`, and it returns what the CLI prints. Its `action` is `spawn`, `list`, `status`, `wait`, `send`, `stop`, `resume`, `last`, or `agents`; its other fields are the CLI flags below in camel case:
 
 ```json
 { "action": "spawn", "name": "review", "tools": "read,grep,find,ls", "noMcp": true, "prompt": "Review the current diff" }
@@ -29,7 +29,7 @@ By default, the child inherits the current Pi provider, model, and reasoning lev
 
 When a role fits, use an agent file: run `subagent agents` to list them, then `subagent spawn --agent <name> --prompt "..."`. The file sets model, thinking, tools, extensions, MCP, time limit, and instructions; a flag you also give overrides it. An unknown name fails and starts nothing.
 
-`--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
+`--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `<repo>/<topic>` under `$PI_SUBAGENT_WORKTREE_ROOT` (default `~/WORK/dev/.worktrees`) on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
 Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, the child is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run.
 
@@ -73,7 +73,7 @@ Spawn prints a random handle and the exact tmux attach command. Past the paralle
 
 ## Get the result
 
-When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, or `timed out`, followed by its answer. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, or timed-out child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
+When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, or `timed out`, followed by its answer and `[The whole answer: <path>]`. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, or timed-out child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
 
 Without that line (print mode, a plain terminal, `PI_SUBAGENT_NOTIFY=0`), no message arrives: use `wait`.
 

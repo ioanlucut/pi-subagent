@@ -169,6 +169,25 @@ test("a child past its time limit is stopped by the tick and reported as timed o
 	assert.match(sent.join(), /^Subagent aaa111 timed out\n/);
 });
 
+test("with results off, a child past its time limit is still stopped by the tick", () => {
+	const tick = new SessionTick({ sessionId: () => "parent", show: () => {} });
+	ticks.push(tick);
+	liveRun("aaa111", { deadline: new Date(Date.now() - 1000).toISOString() });
+
+	tick.wake();
+
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+});
+
+test("while Pi cannot take a message, a child past its time limit is still stopped by the tick", () => {
+	const { tick } = parentTick(() => false);
+	liveRun("aaa111", { deadline: new Date(Date.now() - 1000).toISOString() });
+
+	tick.wake();
+
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+});
+
 test("a queued child keeps the tick, and starts when the last live child ends", async () => {
 	const { tick, shown } = parentTick();
 	const { child } = liveRun("aaa111");

@@ -1,6 +1,7 @@
 import { rmSync } from "node:fs";
-import { pendingResults, reportExitedRuns, stopTimedOutRuns } from "./outbox.ts";
-import { effectiveRunState, guarded, listRuns, startQueuedRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { pendingResults, reportExitedRuns } from "./outbox.ts";
+import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;
@@ -45,20 +46,20 @@ export class SessionTick {
 	/** One tick. Returns whether there is work for the next one. */
 	private run(): boolean {
 		const { sessionId, show, deliver, onStartError } = this.options;
-		startQueuedRuns(sessionId(), onStartError ?? (() => {}));
-		const runs = listRuns(sessionId());
+		const runs = startQueuedRuns(listRuns(sessionId()), onStartError ?? (() => {}));
+		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
+		stopTimedOutRuns(runs);
 		const rows = runs.map((run) => ({ run, state: effectiveRunState(run) })).filter(({ state }) => state !== "exited");
 		show?.(rows);
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
-		stopTimedOutRuns(runs);
-		const starting = reportExitedRuns(runs);
+		const inGrace = reportExitedRuns(runs);
 		const pending = pendingResults(runs);
 		if (pending) {
 			deliver.send(pending.text);
 			for (const file of pending.files) rmSync(file, { force: true });
 		}
-		return rows.length > 0 || starting;
+		return rows.length > 0 || inGrace;
 	}
 }
