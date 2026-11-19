@@ -1,11 +1,10 @@
 import { spawn } from "node:child_process";
-import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import { InboxDelivery } from "./inbox.ts";
-import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
 	guarded,
@@ -20,10 +19,12 @@ import {
 	suspendOrphanedRuns,
 	suspendRuns,
 	type RunMetadata,
+	type RunState,
 	tmuxSessionExists,
 	updateMetadata,
 } from "./shared.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
+import { SessionTick } from "./tick.ts";
 import { ActivityTracker, widgetLines } from "./widget.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
@@ -121,8 +122,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	});
 
 	if (!runDir) {
-		let widgetTimer: ReturnType<typeof setInterval> | undefined;
-		let widgetContext: ExtensionContext | undefined;
 		// Inside Herdr, show each working child in a read-only pane beside this one; PI_SUBAGENT_HERDR_PANES=0 turns it off.
 		const panes =
 			process.env.HERDR_ENV === "1" && process.env.HERDR_PANE_ID && process.env.PI_SUBAGENT_HERDR_PANES !== "0"
@@ -130,50 +129,25 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				: undefined;
 
 		const activity = new ActivityTracker();
+		let tick: SessionTick | undefined;
 
-		const refreshWidget = guarded("widget", (): void => {
-			if (!widgetContext) return;
-			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
-				.map((run) => ({ run, state: effectiveRunState(run) }))
-				.filter(({ state }) => state !== "exited");
-			panes?.sync(activeRuns);
-			if (activeRuns.length === 0) {
-				widgetContext.ui.setWidget("subagents", undefined);
+		const showRows = (ctx: ExtensionContext, rows: { run: RunMetadata; state: RunState }[]): void => {
+			panes?.sync(rows);
+			if (rows.length === 0) {
+				ctx.ui.setWidget("subagents", undefined);
 				return;
 			}
-
-			widgetContext.ui.setWidget(
+			ctx.ui.setWidget(
 				"subagents",
 				widgetLines(
-					activeRuns.map(({ run, state }) => ({ run, state, activity: activity.read(run) })),
-					widgetContext.ui.theme,
+					rows.map(({ run, state }) => ({ run, state, activity: activity.read(run) })),
+					ctx.ui.theme,
 					// Pi pads each widget line by one column on each side.
 					(process.stdout.columns ?? 80) - 2,
 				),
 				{ placement: "belowEditor" },
 			);
-		});
-
-		let resultsTimer: ReturnType<typeof setInterval> | undefined;
-		let resultsContext: ExtensionContext | undefined;
-
-		/** Put the results of this session's children into the chat, so the agent does not block on `wait`. */
-		const deliverResults = guarded("result delivery", (): void => {
-			const ctx = resultsContext;
-			if (!ctx) return;
-			// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
-			if (!ctx.isIdle() && ctx.signal === undefined) return;
-			const runs = listRuns(ctx.sessionManager.getSessionId());
-			reportExitedRuns(runs);
-			const pending = pendingResults(runs);
-			if (!pending) return;
-			// Idle: starts a turn. Busy: waits until the current work is done.
-			pi.sendMessage(
-				{ customType: "subagent-result", content: pending.text, display: true },
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
-			for (const file of pending.files) rmSync(file, { force: true });
-		});
+		};
 
 		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
 		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
@@ -189,26 +163,33 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
 			});
 
-			if (claimResultDelivery(ctx.mode)) {
-				resultsContext = ctx;
-				resultsTimer = setInterval(deliverResults, 1000);
-				resultsTimer.unref();
-			}
-
-			if (!ctx.hasUI) return;
-			widgetContext = ctx;
-			refreshWidget();
-			widgetTimer = setInterval(refreshWidget, 1000);
-			widgetTimer.unref();
+			const delivers = claimResultDelivery(ctx.mode);
+			if (!delivers && !ctx.hasUI) return;
+			tick = new SessionTick({
+				sessionId: () => ctx.sessionManager.getSessionId(),
+				show: ctx.hasUI ? (rows) => showRows(ctx, rows) : undefined,
+				deliver: delivers
+					? {
+							// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
+							ready: () => ctx.isIdle() || ctx.signal !== undefined,
+							// Idle: starts a turn. Busy: waits until the current work is done.
+							send: (text) =>
+								pi.sendMessage(
+									{ customType: "subagent-result", content: text, display: true },
+									{ triggerTurn: true, deliverAs: "followUp" },
+								),
+						}
+					: undefined,
+			});
+			tick.wake();
 		});
 
+		// `subagent spawn` runs from a tool: the first child of the session starts the tick.
+		pi.on("tool_execution_end", () => tick?.wake());
+
 		pi.on("session_shutdown", async (event, ctx) => {
-			if (resultsTimer) clearInterval(resultsTimer);
-			resultsTimer = undefined;
-			resultsContext = undefined;
-			if (widgetTimer) clearInterval(widgetTimer);
-			widgetTimer = undefined;
-			widgetContext = undefined;
+			tick?.stop();
+			tick = undefined;
 			ctx.ui.setWidget("subagents", undefined);
 			panes?.closeAll();
 			if (event.reason === "reload") return;

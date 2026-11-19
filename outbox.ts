@@ -85,14 +85,22 @@ export function markExitKnown(runDir: string): void {
 	}
 }
 
-/** The parent calls this for its runs: a child whose process ended by itself is reported, once. */
-export function reportExitedRuns(runs: RunMetadata[]): void {
+/**
+ * The parent calls this for its runs: a child whose process ended by itself is reported, once. Returns
+ * whether a run with no process yet is still in its grace time, so a later call can report it.
+ */
+export function reportExitedRuns(runs: RunMetadata[]): boolean {
+	let waiting = false;
 	for (const run of runs) {
 		if (run.suspended || existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) !== "exited") continue;
-		if (run.state === "starting" && Date.now() - Date.parse(run.updatedAt) < STARTING_GRACE_MS) continue;
+		if (run.state === "starting" && Date.now() - Date.parse(run.updatedAt) < STARTING_GRACE_MS) {
+			waiting = true;
+			continue;
+		}
 		markExitKnown(run.runDir);
 		writeResult(run, "exited", "Its process ended and nobody stopped it. Spawn the task again if you still need the result.");
 	}
+	return waiting;
 }
 
 /** `wait` calls this on each poll: it prints the result itself, so the parent must not get it as a message too. */
