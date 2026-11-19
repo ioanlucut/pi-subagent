@@ -768,7 +768,7 @@ async function startedChild(run: { runDir: string }): Promise<string> {
 }
 
 /** The parent tick, in a Pi started with a limit of 2. */
-const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => startQueuedRuns("parent", (_run, error) => assert.fail(error)));
+const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, error) => assert.fail(error)));
 
 test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () => {
 	const outputs = spawnMany(3, queueEnv);

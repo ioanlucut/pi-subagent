@@ -46,8 +46,7 @@ export class SessionTick {
 	/** One tick. Returns whether there is work for the next one. */
 	private run(): boolean {
 		const { sessionId, show, deliver, onStartError } = this.options;
-		startQueuedRuns(sessionId(), onStartError ?? (() => {}));
-		const runs = listRuns(sessionId());
+		const runs = startQueuedRuns(listRuns(sessionId()), onStartError ?? (() => {}));
 		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
 		stopTimedOutRuns(runs);
 		const rows = runs.map((run) => ({ run, state: effectiveRunState(run) })).filter(({ state }) => state !== "exited");

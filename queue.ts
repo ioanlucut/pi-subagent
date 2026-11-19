@@ -9,6 +9,7 @@ import {
 	listRuns,
 	prepareLaunch,
 	processStartTime,
+	readMetadata,
 	removeRunDir,
 	type RunMetadata,
 	startLaunch,
@@ -42,20 +43,21 @@ function liveRunCount(runs: RunMetadata[]): number {
 /** This Pi's start time, read once: `ps` costs a program start on the UI thread. */
 let ownStartTime: string | undefined;
 
-/** The parent tick: start the session's queued runs, oldest first, while fewer than the limit run. */
-export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
-	const runs = listRuns(sessionId);
+/**
+ * The parent tick: start the queued ones of the session's `runs`, oldest first, while fewer than the limit
+ * run. Returns the runs as they are after it, so the tick lists the run directory once.
+ */
+export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata, message: string) => void): RunMetadata[] {
 	// No queued run: no liveness check, so the tick costs only the listing.
-	if (!runs.some((run) => run.state === "queued")) return;
+	if (!runs.some((run) => run.state === "queued")) return runs;
 	let free = runLimit() - liveRunCount(runs);
-	for (const run of runs) {
-		if (free <= 0) return;
-		if (run.state !== "queued") continue;
+	return runs.flatMap((run) => {
+		if (free <= 0 || run.state !== "queued") return [run];
 		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
 		ownStartTime ??= processStartTime(process.pid);
 		const starting = updateMetadata(run.runDir, { state: "starting", parentPid: process.pid, parentStarted: ownStartTime });
 		// `stop` removed the run since the listing.
-		if (!starting) continue;
+		if (!starting) return [];
 		free--;
 		try {
 			startLaunch(starting);
@@ -64,7 +66,9 @@ export function startQueuedRuns(sessionId: string, onError: (run: RunMetadata, m
 			updateMetadata(run.runDir, { state: "error", error: message });
 			onError(run, message);
 		}
-	}
+		// Read again: the launch wrote a new deadline.
+		return [readMetadata(run.runDir) ?? starting];
+	});
 }
 
 const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -103,7 +107,7 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 		if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) > RESUME_WINDOW_MS) continue;
 		queueSuspendedRun(run);
 	}
-	startQueuedRuns(sessionId, onError);
+	startQueuedRuns(listRuns(sessionId), onError);
 }
 
 /**
