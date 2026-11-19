@@ -13,12 +13,13 @@ import {
 
 /** tmux starts just after the metadata is written; a run this young with no tmux session has not died. */
 const STARTING_GRACE_MS = 30_000;
-/** A longer answer is cut, so one result cannot fill the parent's context. */
-const MAX_RESULT_CHARS = 16_000;
+/** A longer answer reaches the parent as its start and the path of the whole, so results do not fill the parent's context. */
+const SUMMARY_CHARS = 2_000;
 /** `wait` renews its claim each 500 ms; an older claim is from a `wait` that was killed. */
 const WAITING_MS = 2_000;
 
 const outboxDir = (runDir: string): string => join(runDir, "outbox");
+const answersDir = (runDir: string): string => join(runDir, "answers");
 const exitKnownPath = (runDir: string): string => join(runDir, "exit-known");
 const waitingPath = (runDir: string): string => join(runDir, "waiting");
 
@@ -46,6 +47,23 @@ function writeResult(run: RunMetadata, outcome: string, body: string): void {
 	}
 }
 
+/**
+ * Save a long answer in the run directory and return its start with the path. One file per turn: an older
+ * message keeps pointing at its own answer. Never creates the run directory: `stop` may have removed it.
+ */
+function summarize(run: RunMetadata, text: string): string {
+	if (text.length <= SUMMARY_CHARS) return text;
+	const dir = answersDir(run.runDir);
+	const file = join(dir, `${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+	try {
+		if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
+		writeFileSync(file, text, { mode: 0o600 });
+	} catch {
+		return text; // The run is gone; writeResult drops the message too.
+	}
+	return `${text.slice(0, SUMMARY_CHARS)}\n\n[First ${SUMMARY_CHARS} of ${text.length} characters. The whole answer: ${file}]`;
+}
+
 /** The child calls this when its turn ends: the parent session gets the answer as a message. */
 export function reportSettledTurn(runDir: string): void {
 	const run = readMetadata(runDir);
@@ -55,12 +73,7 @@ export function reportSettledTurn(runDir: string): void {
 	if (run.suspended || existsSync(exitKnownPath(runDir))) return;
 	const message = readLatestAssistant(run.sessionFile);
 	if (!message) return;
-	const text = assistantText(message);
-	const body =
-		text.length <= MAX_RESULT_CHARS
-			? text
-			: `${text.slice(0, MAX_RESULT_CHARS)}\n\n[Cut at ${MAX_RESULT_CHARS} of ${text.length} characters. The whole answer: \`subagent last ${run.handle}\`, before \`stop\`.]`;
-	writeResult(run, turnOutcome(message), body);
+	writeResult(run, turnOutcome(message), summarize(run, assistantText(message)));
 }
 
 /** `stop` calls this before it ends the child, so the end is not reported as a surprise. */

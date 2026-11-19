@@ -524,6 +524,16 @@ test("last prints the latest answer and the state, without waiting", () => {
 	assert.equal(result.stdout, "abc123 busy\n\nAll good.\n");
 });
 
+test("last prints a long answer whole, not the summary the parent got", () => {
+	const text = "y".repeat(10_000);
+	const handle = idleRun({ content: [{ type: "text", text }], stopReason: "stop" });
+
+	const result = runCli(["last", handle], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, `abc123 idle\n\n${text}\n`);
+});
+
 test("interrupt queues an interrupt for a busy child, and tells that an idle child has nothing to stop", () => {
 	const handle = idleRun({ content: [], stopReason: "stop" });
 	const [run] = listRuns();

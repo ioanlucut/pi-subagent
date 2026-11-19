@@ -59,7 +59,7 @@ Spawn prints a random handle and the exact tmux attach command. Keep the handle 
 
 ## Get the result
 
-When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, or `exited`, followed by its answer. A failed or exited child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
+When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, or `exited`, followed by its answer. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed or exited child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
 
 Without that line (print mode, a plain terminal, `PI_SUBAGENT_NOTIFY=0`), no message arrives: use `wait`.
 
@@ -100,7 +100,7 @@ subagent send <handle> --follow-up "message"
 # Busy: ends the current turn, like Escape. The child stays, ready for `send`.
 subagent interrupt <handle>
 
-# Prints the state and latest answer, without waiting. Use it for a result that was cut.
+# Prints the state and latest answer, whole, without waiting.
 subagent last <handle>
 ```
 
