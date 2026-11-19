@@ -111,6 +111,10 @@ test("the state decides the icon color, and more than five children are counted"
 	assert.deepEqual(widgetLines([], theme, 40, 0), []);
 });
 
+test("a queued child gets a row that says it waits for a slot", () => {
+	assert.deepEqual(widgetLines([row("aaa111", "queued", {}, "review")], plain, 40, 0), ["· review          queued        ↓0 $0.00"]);
+});
+
 test("display width counts wide characters and emoji as two columns, and the row icons as one", () => {
 	assert.equal(displayWidth("ab"), 2);
 	assert.equal(displayWidth("レビュー"), 8);

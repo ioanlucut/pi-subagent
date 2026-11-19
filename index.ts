@@ -17,6 +17,7 @@ import {
 	removeRunDir,
 	resumeSuspendedRuns,
 	runDisplayName,
+	startQueuedRuns,
 	suspendOrphanedRuns,
 	suspendRuns,
 	type RunMetadata,
@@ -43,7 +44,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.registerCommand("subagent", {
 		description: "Select and attach to a subagent spawned by this session",
 		handler: async (_args, ctx) => {
-			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => effectiveRunState(run) !== "exited");
+			// A queued child has no tmux session to attach to yet.
+			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => !["exited", "queued"].includes(effectiveRunState(run)));
 			if (runs.length === 0) {
 				ctx.ui.notify("No active subagents spawned by this session", "info");
 				return;
@@ -131,8 +133,20 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 		const activity = new ActivityTracker();
 
+		let queueContext: ExtensionContext | undefined;
+
+		/** Start queued children when a slot is free. The first tick that runs in this session calls it. */
+		const startQueued = guarded("queue", (): void => {
+			const ctx = queueContext;
+			if (!ctx) return;
+			startQueuedRuns(ctx.sessionManager.getSessionId(), (run, message) => {
+				if (ctx.hasUI) ctx.ui.notify(`Could not start subagent ${runDisplayName(run)}: ${message}`, "error");
+			});
+		});
+
 		const refreshWidget = guarded("widget", (): void => {
 			if (!widgetContext) return;
+			if (!resultsTimer) startQueued();
 			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
 				.map((run) => ({ run, state: effectiveRunState(run) }))
 				.filter(({ state }) => state !== "exited");
@@ -161,6 +175,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		const deliverResults = guarded("result delivery", (): void => {
 			const ctx = resultsContext;
 			if (!ctx) return;
+			startQueued();
 			// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
 			if (!ctx.isIdle() && ctx.signal === undefined) return;
 			const runs = listRuns(ctx.sessionManager.getSessionId());
@@ -190,7 +205,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
 			});
 
-			if (claimResultDelivery(ctx.mode)) {
+			const delivers = claimResultDelivery(ctx.mode);
+			// `spawn` from this Pi's bash tool queues past the limit only when a tick here starts queued runs.
+			queueContext = ctx;
+			process.env.PI_SUBAGENT_QUEUE = delivers || ctx.hasUI ? "1" : "0";
+			if (delivers) {
 				resultsContext = ctx;
 				resultsTimer = setInterval(deliverResults, 1000);
 				resultsTimer.unref();
@@ -207,6 +226,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			if (resultsTimer) clearInterval(resultsTimer);
 			resultsTimer = undefined;
 			resultsContext = undefined;
+			queueContext = undefined;
 			if (widgetTimer) clearInterval(widgetTimer);
 			widgetTimer = undefined;
 			widgetContext = undefined;
@@ -214,11 +234,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			panes?.closeAll();
 			if (event.reason === "reload") return;
 			// Suspend running children: stop the process but keep transcript and metadata so resuming this
-			// session relaunches them. Children that already exited on their own are discarded.
+			// session relaunches them. Children that already exited on their own are discarded; queued ones wait.
 			const running: RunMetadata[] = [];
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 				if (tmuxSessionExists(run.tmuxSession)) running.push(run);
-				else if (!run.suspended) removeRunDir(run.runDir);
+				else if (!run.suspended && run.state !== "queued") removeRunDir(run.runDir);
 			}
 			await suspendRuns(running);
 		});
