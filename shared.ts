@@ -473,6 +473,22 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	await Promise.all(runs.map((run) => waitForRunShutdown(run.runDir)));
 }
 
+/**
+ * The parent quits or leaves the session: suspend its running and queued children, so resuming the session
+ * starts them again within 24 h; remove those that already exited on their own.
+ */
+export async function suspendSessionRuns(sessionId: string): Promise<void> {
+	const running: RunMetadata[] = [];
+	for (const run of listRuns(sessionId)) {
+		if (run.state === "queued") {
+			// Never started: its saved launch keeps the first prompt for resume.
+			updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() });
+		} else if (tmuxSessionExists(run.tmuxSession)) running.push(run);
+		else if (!run.suspended) removeRunDir(run.runDir);
+	}
+	await suspendRuns(running);
+}
+
 /** Suspend running children whose parent process died without its shutdown handler (crash, kill -9, lost terminal). */
 export async function suspendOrphanedRuns(): Promise<void> {
 	await suspendRuns(listRuns().filter((run) => parentIsGone(run) && tmuxSessionExists(run.tmuxSession)));
@@ -591,7 +607,8 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 			childPid: null,
 			childStarted: undefined,
 		}) ?? run;
-	prepareLaunch(queued);
+	// A child that never started still has the launch `spawn` saved, with its first prompt.
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(queued);
 	return queued;
 }
 

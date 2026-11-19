@@ -15,14 +15,12 @@ import {
 	listRuns,
 	pruneStaleRuns,
 	readMetadata,
-	removeRunDir,
 	resumeSuspendedRuns,
 	runDisplayName,
 	suspendOrphanedRuns,
-	suspendRuns,
+	suspendSessionRuns,
 	type RunMetadata,
 	type RunState,
-	tmuxSessionExists,
 	updateMetadata,
 } from "./shared.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
@@ -240,14 +238,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			ctx.ui.setWidget("subagents", undefined);
 			panes?.closeAll();
 			if (event.reason === "reload") return;
-			// Suspend running children: stop the process but keep transcript and metadata so resuming this
-			// session relaunches them. Children that already exited on their own are discarded; queued ones wait.
-			const running: RunMetadata[] = [];
-			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				if (tmuxSessionExists(run.tmuxSession)) running.push(run);
-				else if (!run.suspended && run.state !== "queued") removeRunDir(run.runDir);
-			}
-			await suspendRuns(running);
+			await suspendSessionRuns(ctx.sessionManager.getSessionId());
 		});
 		return;
 	}

@@ -29,6 +29,7 @@ import {
 	resumeSuspendedRuns,
 	startQueuedRuns,
 	suspendOrphanedRuns,
+	suspendSessionRuns,
 	suspendRuns,
 	tmuxSessionExists,
 	updateMetadata,
@@ -825,6 +826,23 @@ test("a child suspended 25 hours ago stays suspended after resume, and list show
 	assert.equal(byName("c1").state, "starting", "a child suspended just now starts");
 	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c0 \(\w+\)  suspended  /m);
 	assert.match(runCli(["status", byName("c0").handle], {}).stdout, /^c0 \(\w+\): suspended /);
+});
+
+test("a queued child is suspended when its parent quits: after 25 h it stays suspended, and a recent one starts with its prompt", async () => {
+	spawnMany(4, queueEnv);
+	await suspendSessionRuns("parent");
+	updateMetadata(byName("c2").runDir, { suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+
+	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+
+	assert.equal(tmuxSessionExists(byName("c2").tmuxSession), false);
+	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c2 \(\w+\)  suspended  /m);
+	assert.equal(byName("c3").state, "queued", "behind the limit");
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	await tick();
+	assert.equal(byName("c3").state, "starting");
+	await startedChild(byName("c3"));
+	assert.equal(JSON.parse(readFileSync(join(byName("c3").runDir, "argv"), "utf8")).at(-1), "Task:\ntask 3");
 });
 
 /** A child of session `parent` suspended 25 hours ago, so resuming the session leaves it suspended. */
