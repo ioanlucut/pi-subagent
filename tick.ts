@@ -55,12 +55,12 @@ export class SessionTick {
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
-		const starting = reportExitedRuns(runs);
+		const inGrace = reportExitedRuns(runs);
 		const pending = pendingResults(runs);
 		if (pending) {
 			deliver.send(pending.text);
 			for (const file of pending.files) rmSync(file, { force: true });
 		}
-		return rows.length > 0 || starting;
+		return rows.length > 0 || inGrace;
 	}
 }
