@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check:live": "node live-check.ts"
+    "check:live": "node live-check.ts",
+    "verify:spec": "node verify-spec.ts"
   },
   "bin": {
     "subagent": "./subagent.ts"

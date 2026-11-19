@@ -297,6 +297,17 @@ npm test
 The tests use `node --test` with no dependencies. Each test starts its own tmux server on a private socket (`TMUX_TMPDIR`) and a fake `pi` that records what it got, so they touch no real session and need no model.
 
 ```sh
+npm run verify:spec
+```
+
+The spec check proves [#14](https://github.com/ioanlucut/pi-subagent/issues/14) on this machine, with no model and no login. It starts real `sleep` processes as children and a `tmux` that records each call, in a temporary agent directory. It prints one `ok` or `FAIL` line per claim and exits with the number of failures:
+
+- 10 ticks with 3 live children start no `tmux`, and one tick blocks the UI thread for less than 50 ms; it also prints the cost the old check had on this machine
+- a dead child, and a child whose process ID belongs to another process, are reported as exited
+- a session with no children stops its tick
+- the acceptance tests of each ticket, #16 to #24, pass
+
+```sh
 npm run check:live
 ```
 
