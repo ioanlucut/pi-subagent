@@ -35,7 +35,7 @@ Pi installs no package `bin` entries, so link the CLI into a directory on your `
 ln -s ~/WORK/dev/pi-subagent/subagent.ts ~/.local/bin/subagent
 ```
 
-Run `/reload` in each open Pi. The extension brings its own `subagent` skill, so the model in Pi knows the CLI without more setup. To check: `subagent list` prints `No subagents`.
+Run `/reload` in each open Pi. The extension brings its own `subagent` skill and a `subagent` model tool, so the model in Pi can delegate without more setup, even when the CLI is not on `PATH`. To check: `subagent list` prints `No subagents`.
 
 ## First run
 
@@ -51,7 +51,9 @@ subagent wait a1b2c3    # blocks until the child is idle, then prints its final 
 subagent stop a1b2c3    # removes the child and its tmux session; keeps its transcript
 ```
 
-Let the model run `spawn`. Only Pi's bash tool sets the parent session, provider, model, and thinking level that `spawn` reads. A `!` command or another terminal does not: there `spawn` fails unless you pass `--provider` and `--model`, the child has no parent session, so it is never suspended or resumed, and `subagent list` shows the children of all sessions. Stop such children yourself.
+The model can do the same with the `subagent` tool, for example `{ "action": "spawn", "name": "review", "tools": "read,grep,find,ls", "prompt": "Review the current diff independently" }`. The tool runs the CLI that ships with the extension and returns what the CLI prints; it takes the parent session, provider, model, thinking level, and directory from Pi, as the bash tool does. Its actions are `spawn`, `list`, `status`, `wait`, `send`, `stop`, `last`, and `agents`, and its fields are the spawn options in camel case (`noMcp` for `--no-mcp`, `files` for `--file`). `rename` and `interrupt` stay CLI only.
+
+Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the parent session, provider, model, and thinking level that `spawn` reads. A `!` command or another terminal does not: there `spawn` fails unless you pass `--provider` and `--model`, the child has no parent session, so it is never suspended or resumed, and `subagent list` shows the children of all sessions. Stop such children yourself.
 
 ## Commands
 
@@ -269,6 +271,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 ```
 
 - `subagent.ts` is the CLI. It writes the run directory and starts the tmux session.
+- `tool.ts` is the `subagent` model tool. It runs `subagent.ts` with the session, model, and directory from Pi's tool context, so the tool and the CLI share one code path.
 - `index.ts` is the extension. In the parent it shows one row per child, adds `/subagent`, and suspends and resumes children. In the child it keeps `metadata.json` up to date, with the child's process ID and start time.
 - Each second the parent checks whether each child runs from that process ID (`kill(pid, 0)`), with no program started; `ps` checks the start time once per child, so a reused ID does not count. On a busy macOS any program start can take a second, and these checks run on Pi's UI thread. A run from before this change, with no process ID, still asks tmux.
 - `inbox.ts` gives the messages in `inbox/` to the child, oldest first.
