@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
@@ -50,14 +50,26 @@ test("a turn that ended in a provider error is reported as failed, not finished"
 	assert.equal(pendingResults([run])?.text, "Subagent bbb222 failed (error)\n\nOAuth refresh failed");
 });
 
-test("a long answer is cut, with the command that prints it whole", () => {
-	const run = storedRun("pqr777", answer("x".repeat(20_000)));
+test("a long answer reaches the parent as a summary with the path of a file that holds it whole", () => {
+	const full = `${"a".repeat(2_000)}${"b".repeat(8_000)}`;
+	const run = storedRun("pqr777", answer(full));
 
 	reportSettledTurn(run.runDir);
 	const text = pendingResults([run])?.text ?? "";
 
-	assert.ok(text.length < 16_300, `${text.length} characters`);
-	assert.match(text, /x\n\n\[Cut at 16000 of 20000 characters\. The whole answer: `subagent last pqr777`, before `stop`\.\]$/);
+	const match = text.match(/^Subagent pqr777 finished\n\na{2000}\n\n\[First 2000 of 10000 characters\. The whole answer: (\S+)\]$/);
+	assert.ok(match, text.slice(-300));
+	assert.ok(match[1].startsWith(join(run.runDir, "answers")), match[1]);
+	assert.equal(readFileSync(match[1], "utf8"), full);
+});
+
+test("a short answer reaches the parent whole, with no file", () => {
+	const run = storedRun("stu888", answer("c".repeat(2_000)));
+
+	reportSettledTurn(run.runDir);
+
+	assert.equal(pendingResults([run])?.text, `Subagent stu888 finished\n\n${"c".repeat(2_000)}`);
+	assert.equal(existsSync(join(run.runDir, "answers")), false);
 });
 
 test("a turn with a queued `send` is not reported: the next turn has the result", () => {
