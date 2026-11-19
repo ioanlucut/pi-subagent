@@ -62,7 +62,7 @@ function fakePi(dir: string): string {
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;
@@ -88,6 +88,17 @@ async function childEnv(agentDir: string, timeoutMs = 5000): Promise<Map<string,
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
 	}
 	assert.fail(`Timed out waiting for ${path}`);
+}
+
+/** The arguments the fake `pi` got, once it has started. */
+async function childArgs(agentDir: string): Promise<string[]> {
+	await childEnv(agentDir);
+	return JSON.parse(readFileSync(join(onlyRunDir(agentDir), "argv"), "utf8")) as string[];
+}
+
+/** The values of each `--extension` flag, in order. */
+function extensionFlags(args: string[]): string[] {
+	return args.flatMap((arg, i) => (arg === "--extension" ? [args[i + 1]] : []));
 }
 
 function onlyRunDir(agentDir: string): string {
@@ -538,6 +549,77 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.equal(result.stdout, "Interrupting abc123. Its turn ends as failed (aborted).\n");
 	const [file] = readdirSync(join(run.runDir, "inbox"));
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
+});
+
+/** Install a fake command guard where `pi install npm:cc-safety-net` puts it. */
+function installGuard(): string {
+	const guard = join(agentDir(), "npm", "node_modules", "cc-safety-net");
+	mkdirSync(guard, { recursive: true });
+	return guard;
+}
+
+test("spawn --extensions loads only the listed extensions, this extension, and the command guard", async () => {
+	const guard = installGuard();
+	const result = runCli(
+		["spawn", "--cwd", root, "--extensions", "/ext/a.ts,npm:b", "--prompt", "hi"],
+		spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+	);
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.ok(args.includes("--no-extensions"));
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts", "npm:b"]);
+});
+
+test("spawn --extensions drops the command guard only when the list names -cc-safety-net", async () => {
+	installGuard();
+	const result = runCli(
+		["spawn", "--cwd", root, "--extensions", "/ext/a.ts,-cc-safety-net", "--prompt", "hi"],
+		spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+	);
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
+
+test("spawn --no-mcp starts the child with no MCP servers", async () => {
+	const result = runCli(["spawn", "--cwd", root, "--no-mcp", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.ok((await childArgs(agentDir())).includes("--no-mcp"));
+});
+
+test("a suspended light child relaunches with the same flags", async () => {
+	installGuard();
+	const bin = fakePi(join(root, "bin"));
+	const result = runCli(
+		["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--no-mcp", "--prompt", "hi"],
+		{ ...spawnEnv(agentDir(), bin), PI_SESSION_ID: "parent-session" },
+	);
+	assert.equal(result.status, 0, result.stderr);
+	const first = await childArgs(agentDir());
+	const [run] = listRuns();
+	await suspendRuns([run]);
+	rmSync(join(run.runDir, "probe"));
+
+	await withEnv({ PATH: `${bin}:${basePath}` }, () =>
+		resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error)),
+	);
+
+	const relaunched = await childArgs(agentDir());
+	assert.deepEqual(extensionFlags(relaunched), extensionFlags(first));
+	assert.ok(relaunched.includes("--no-extensions"));
+	assert.ok(relaunched.includes("--no-mcp"));
+});
+
+test("a child with no new flags starts as today: all extensions and MCP servers", async () => {
+	installGuard();
+	spawnChildren(1);
+
+	const args = await childArgs(agentDir());
+	assert.equal(args.includes("--no-extensions"), false);
+	assert.equal(args.includes("--no-mcp"), false);
+	assert.deepEqual(extensionFlags(args), []);
 });
 
 test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {

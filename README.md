@@ -113,6 +113,8 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--file <path>`                        |                                                      | Repeatable. Attached to the first turn.                                               |
 | `--no-context-files`                   | off                                                  | Ignore `AGENTS.md` and `CLAUDE.md`, for a review those must not bias.                 |
 | `--no-extensions`                      | off                                                  | No extensions except the subagent control bridge.                                     |
+| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net`; `-cc-safety-net` in the list drops the guard. |
+| `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
 
 ## Recipes
