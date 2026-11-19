@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { pendingResults, reportExitedRuns } from "./outbox.ts";
+import { hasResults, pendingResults, reportExitedRuns } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
@@ -60,6 +60,6 @@ export class SessionTick {
 			deliver.send(pending.text);
 			for (const file of pending.files) rmSync(file, { force: true });
 		}
-		return rows.length > 0 || inGrace;
+		return rows.length > 0 || inGrace || hasResults(runs);
 	}
 }

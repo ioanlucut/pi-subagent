@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
+import { markExitKnown, markWaiting } from "./outbox.ts";
 import { processStartTime, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
@@ -157,6 +158,25 @@ test("a result that cannot be sent yet keeps the tick until it is sent", async (
 	const count = shown.length;
 	mock.timers.tick(5000);
 	assert.equal(shown.length, count);
+});
+
+test("a result held by a cancelled wait keeps the tick, and arrives when the wait's claim expires", async () => {
+	const { tick, sent } = parentTick();
+	const { run, child } = liveRun("aaa111");
+	await kill(child);
+	markExitKnown(run.runDir);
+	mkdirSync(join(run.runDir, "outbox"));
+	writeFileSync(join(run.runDir, "outbox", "1.txt"), "Subagent aaa111 finished\n\nthe answer");
+	markWaiting(run.runDir);
+
+	tick.wake();
+	assert.deepEqual(sent, [], "a running wait prints it");
+	// The wait was cancelled: its claim is no longer renewed and expires.
+	const stale = new Date(Date.now() - 5000);
+	utimesSync(join(run.runDir, "waiting"), stale, stale);
+	mock.timers.tick(1000);
+
+	assert.match(sent.join(), /the answer/);
 });
 
 test("a child past its time limit is stopped by the tick and reported as timed out", () => {

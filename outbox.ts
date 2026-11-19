@@ -152,6 +152,14 @@ export function pendingResults(runs: RunMetadata[]): { text: string; files: stri
 	return files.length > 0 ? { text: texts.join("\n\n---\n\n"), files } : undefined;
 }
 
+/**
+ * Whether a result of these runs is still to be sent, also one a `wait` holds: a `wait` that was cancelled
+ * stops renewing its claim, and the parent must still be there to send the result when the claim expires.
+ */
+export function hasResults(runs: RunMetadata[]): boolean {
+	return runs.some((run) => existsSync(outboxDir(run.runDir)) && readdirSync(outboxDir(run.runDir)).some((entry) => entry.endsWith(".txt")));
+}
+
 /** `wait` calls this after it printed the result. */
 export function clearResults(runDir: string): void {
 	rmSync(outboxDir(runDir), { recursive: true, force: true });
