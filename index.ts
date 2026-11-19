@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import { InboxDelivery } from "./inbox.ts";
-import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { claimResultDelivery, pendingResults, reportExitedRuns, reportSettledTurn, stopTimedOutRuns } from "./outbox.ts";
 import {
 	claimRunDir,
 	guarded,
@@ -164,6 +164,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
 			if (!ctx.isIdle() && ctx.signal === undefined) return;
 			const runs = listRuns(ctx.sessionManager.getSessionId());
+			stopTimedOutRuns(runs);
 			reportExitedRuns(runs);
 			const pending = pendingResults(runs);
 			if (!pending) return;
