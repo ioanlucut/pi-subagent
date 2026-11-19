@@ -59,7 +59,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 
 | Command                                                          | Effect                                                                                                                                                                          |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child. Prints its handle and the tmux attach command.                                                                                                                   |
+| `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child, or queue it past the limit (see below). Prints its handle and the tmux attach command.                                                                          |
 | `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).                                                                                                |
 | `subagent status <handle>`                                       | One child's state and model.                                                                                                                                                    |
 | `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. A child past its `spawn --timeout` is stopped and prints `<handle> timed out`, exit 1. |
@@ -68,7 +68,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
 | `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
-| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle.                                                                                                                                                      |
+| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts.                                                                                                          |
 | `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
@@ -78,6 +78,10 @@ Below the Pi editor, each child has one row: its state, name, time in the curren
 ⟳ review-spec  1m05s  bash npm test               ↓12k $0.42
 ✓ standards           No findings.                ↓900 $0.02
 ```
+
+### At most 4 children run at once
+
+In the TUI and in RPC mode, at most 4 children of one parent session run at the same time. A `spawn` past the limit returns at once with `State: queued`; the parent starts queued children in the order they were spawned, each within a second of a free slot. A child holds its slot while it runs, idle or busy, until it is stopped or exits. `list`, `status`, and the rows below the editor show `queued`; `stop` removes a queued child before it starts. Set `PI_SUBAGENT_LIMIT` before you start Pi to change the limit. A `spawn` outside such a Pi (a plain terminal, print mode) starts the child at once, since nothing would start it later.
 
 ### Results arrive as messages
 
