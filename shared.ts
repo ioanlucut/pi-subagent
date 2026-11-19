@@ -41,6 +41,12 @@ export interface RunMetadata {
 	thinking: string;
 	/** Extra pi CLI flags (tools, isolation) reused when the run is relaunched. */
 	launchArgs?: string[];
+	/** Time limit as given to `spawn --timeout`, such as `10m`. */
+	timeout?: string;
+	/** When the time limit ends, set each time the child is launched; the parent then stops the child. */
+	deadline?: string;
+	/** Set when the parent stopped the child at its deadline. */
+	timedOut?: boolean;
 	/** Set by the parent when it stops the child on quit or session switch; the child is relaunched on resume. */
 	suspended?: boolean;
 	state: RunState;
@@ -73,6 +79,14 @@ interface AssistantMessage {
 interface AssistantEntry extends SessionEntry {
 	type: "message";
 	message: AssistantMessage;
+}
+
+const DURATION_UNITS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000 };
+
+/** Milliseconds in a duration such as `90s`, `10m`, or `1h`; undefined when it is not one. */
+export function parseDuration(value: string): number | undefined {
+	const match = /^([1-9]\d*)([smh])$/.exec(value);
+	return match ? Number(match[1]) * DURATION_UNITS[match[2]] : undefined;
 }
 
 /** Survives `/reload`, which loads this module again in the same process. */
@@ -249,6 +263,10 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 
 /** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
 export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
+	// The limit counts from each launch, so a resumed child is not stopped for the time it was suspended.
+	// Written before tmux starts the child, which writes this file too.
+	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
+	if (limit !== undefined) updateMetadata(metadata.runDir, { deadline: new Date(Date.now() + limit).toISOString() });
 	// A file in the working directory must not choose the program: a cloned repository could.
 	const launcher = process.env.PI_SUBAGENT_PI || "pi";
 	const launchFile = writeLaunchFile(
