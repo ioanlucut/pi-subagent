@@ -305,7 +305,26 @@ The spec check proves [#14](https://github.com/ioanlucut/pi-subagent/issues/14) 
 - 10 ticks with 3 live children start no `tmux`, and one tick blocks the UI thread for less than 50 ms; it also prints the cost the old check had on this machine
 - a dead child, and a child whose process ID belongs to another process, are reported as exited
 - a session with no children stops its tick
-- the acceptance tests of each ticket, #16 to #24, pass
+- the acceptance tests of each ticket, #15 to #24, pass. Each ticket names its tests exactly, so a renamed or deleted test is a `FAIL`
+
+It proves each part alone, through a fake `pi` and a tick called directly. It does not prove that Pi runs the extension's tick, that a real child records its process ID, or that the parts work together.
+
+```sh
+npm run verify:e2e
+```
+
+The end-to-end check runs the real extension in real Pi processes, with no model login and no cost. A local fake model (OpenAI-compatible, scripted replies) drives a parent `pi --mode rpc` that loads this checkout's `index.ts`; its children are real Pi processes in real tmux sessions with the same fake model. It uses a temporary agent directory, a private tmux server, and a `tmux` that logs each call, and opens no Herdr pane. It takes about 30 s, prints one `ok` or `FAIL` line per step, and exits with the number of failures:
+
+- a session with no children shows no subagent widget and starts no program
+- the `subagent` tool, called by the model, spawns a real child Pi in tmux, and its metadata gets its real `childPid`
+- with `subagentLimit: 1`, a second spawn shows `queued`, and starts by itself when the first child ends
+- while the child works, the widget shows its row, and the parent's ticks run no `tmux has-session`
+- the answer reaches the parent as a `subagent-result` message, with the path of a file that holds it whole
+- a busy child with `--timeout 3s` is stopped by the parent and reported `timed out`
+- `spawn --agent` and `--worktree` start a real child with the agent file's model, in the new worktree
+- parent quit suspends a running child and a queued one; a new parent on the same session resumes them through the queue
+
+It does not prove what a real model does with the skill and the tool, the Herdr panes, or how the widget looks in the terminal; `check:live` and use do.
 
 ```sh
 npm run check:live

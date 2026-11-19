@@ -108,26 +108,82 @@ try {
 	rmSync(root, { recursive: true, force: true });
 }
 
-// 4. The behaviour tickets: each has acceptance tests in the suite. Run them by ticket.
-const suites: [string, string, string][] = [
-	["#16", "subagent.test.ts", "extensions|no-mcp|guard|light child"],
-	["#17", "subagent.test.ts", "worktree"],
-	["#18", "outbox.test.ts|subagent.test.ts", "answer|summary"],
-	["#20", "subagent.test.ts|widget.test.ts|tick.test.ts", "queue|limit"],
-	["#21", "subagent.test.ts|tick.test.ts", "time limit|timeout|timed out"],
-	["#22", "subagent.test.ts", "resume|suspended"],
-	["#23", "subagent.test.ts", "agent"],
-	["#24", "subagent.test.ts", "tool"],
+// 4. The behaviour tickets: each acceptance criterion has a test in the suite, named here exactly, so a
+// renamed or deleted test is a FAIL and not a smaller match.
+const suites: [string, string[], string[]][] = [
+	["#15", ["liveness.test.ts"], [
+		"a parent with 3 live children runs 10 widget and result ticks and starts no tmux",
+		"a dead child, and a child whose process ID now belongs to another process, are reported as exited in one tick",
+	]],
+	["#16", ["subagent.test.ts"], [
+		"spawn --extensions loads only the listed extensions, this extension, and the command guard",
+		"spawn --no-mcp starts the child with no MCP servers",
+		"a suspended light child relaunches with the same flags",
+		"a child with no new flags starts as today: all extensions and MCP servers",
+	]],
+	["#17", ["subagent.test.ts"], [
+		"spawn --worktree creates the worktree on a new branch from --base and starts the child in it",
+		"spawn --worktree reuses a clean worktree of the same branch, and refuses one with other work",
+		"stop leaves the worktree and its branch",
+	]],
+	["#18", ["outbox.test.ts", "subagent.test.ts"], [
+		"a long answer reaches the parent as a summary with the path of a file that holds it whole",
+		"a short answer reaches the parent whole, with the path of a file that holds it",
+		"last prints a long answer whole, not the summary the parent got",
+		"after stop, the answer file named in the parent's message still exists, beside the kept transcript",
+	]],
+	["#19", ["tick.test.ts"], [
+		"a session with no children runs no tick: a run written later is not seen in 5 s, and no program starts",
+		"a child starts the tick: its row shows each second, with no program started",
+		"when the last child ends, its exit arrives as a message, the rows clear, and the tick stops",
+	]],
+	["#20", ["subagent.test.ts", "widget.test.ts", "tick.test.ts"], [
+		"with a limit of 2, spawning 3 children starts 2 and queues 1",
+		"when a child ends, the next tick starts the queued child with the caller's environment and its prompt",
+		"a queued child keeps the tick, and starts when the last live child ends",
+		"list and status show a queued child as queued",
+		"a queued child gets a row that says it waits for a slot",
+		"stop removes a queued child, and it never starts",
+		"a spawn with no parent tick starts each child at once, past the limit",
+	]],
+	["#21", ["subagent.test.ts", "tick.test.ts"], [
+		"a child past its time limit is stopped by the parent tick and reported once as timed out",
+		"a child past its time limit is stopped by the tick and reported as timed out",
+		"wait on a busy child with --timeout 2s reports it timed out after about 2 s, and keeps its transcript",
+	]],
+	["#22", ["subagent.test.ts"], [
+		"resuming a session with 6 suspended children and a limit of 2 starts 2 and queues 4",
+		"a child suspended 25 hours ago stays suspended after resume, and list shows it as suspended",
+		"subagent resume queues a suspended child, and it starts when a slot is free",
+	]],
+	["#23", ["subagent.test.ts"], [
+		"spawn --agent starts the child with the agent file's model, thinking, tools, extensions, and instructions",
+		"a flag on spawn overrides the agent file",
+		"a project agent file overrides a global one with the same name",
+		"agents lists the name and description of each agent, a project one in place of a global one",
+		"spawn --agent with an unknown name fails and starts nothing",
+	]],
+	["#24", ["subagent.test.ts"], [
+		"the subagent tool spawns a child of the tool's session when the subagent CLI is not on PATH",
+		"each subagent tool action prints what the matching CLI command prints",
+		"a child spawned with the subagent tool is suspended and resumed like a CLI child",
+		"the bundled skill names the subagent tool first and the CLI second",
+	]],
 ];
-for (const [ticket, files, pattern] of suites) {
-	const result = spawnSync(process.execPath, ["--test", "--test-name-pattern", pattern, ...files.split("|")], {
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+for (const [ticket, files, names] of suites) {
+	const pattern = `^(${names.map(escape).join("|")})$`;
+	const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--test-name-pattern", pattern, ...files], {
 		cwd: repo,
 		encoding: "utf8",
 	});
-	const count = (name: string) => Number(result.stdout.match(new RegExp(`^ℹ ${name} (\\d+)`, "m"))?.[1] ?? 0);
-	const pass = count("pass");
-	const fail = count("fail");
-	check(result.status === 0 && pass > 0 && fail === 0, `${ticket} acceptance tests pass`, `${pass} pass, ${fail} fail`);
+	// TAP: `ok 3 - <name>` or `not ok 3 - <name>` for each test that ran.
+	const ran = [...result.stdout.matchAll(/^(not )?ok \d+ - (.*)$/gm)].filter((line) => !/# SKIP/.test(line[2]));
+	const passed = new Set(ran.filter((line) => !line[1]).map((line) => line[2]));
+	const missing = names.filter((name) => !ran.some((line) => line[2] === name));
+	const failed = names.filter((name) => !missing.includes(name) && !passed.has(name));
+	const detail = [missing.length ? `missing: ${missing.join("; ")}` : "", failed.length ? `failed: ${failed.join("; ")}` : ""].filter(Boolean).join("  ");
+	check(result.status === 0 && missing.length === 0 && failed.length === 0, `${ticket} ${names.length} acceptance tests pass`, detail);
 }
 
 console.log(failures === 0 ? "\nspec #14 verified" : `\n${failures} check(s) failed`);
