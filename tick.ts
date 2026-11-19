@@ -47,12 +47,13 @@ export class SessionTick {
 		const { sessionId, show, deliver, onStartError } = this.options;
 		startQueuedRuns(sessionId(), onStartError ?? (() => {}));
 		const runs = listRuns(sessionId());
+		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
+		stopTimedOutRuns(runs);
 		const rows = runs.map((run) => ({ run, state: effectiveRunState(run) })).filter(({ state }) => state !== "exited");
 		show?.(rows);
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
-		stopTimedOutRuns(runs);
 		const starting = reportExitedRuns(runs);
 		const pending = pendingResults(runs);
 		if (pending) {
