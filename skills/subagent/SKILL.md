@@ -49,6 +49,8 @@ Three additional built-in tools are available but off by default:
 ## Isolation flags
 
 - `--no-extensions` - Disable normal extension discovery. Use for an independent run that should not inherit unrelated extension behavior or extension-provided tools. The subagent control bridge is still explicitly loaded.
+- `--extensions <list>` - Light child: load only the listed extensions (comma-separated paths or `npm:` sources), plus the subagent control bridge and the command guard `cc-safety-net`. Add `-cc-safety-net` to the list only when the user asks to drop the guard. Use for reviews and other runs that need few extensions.
+- `--no-mcp` - Start no MCP servers. Use for every child that does not need MCP tools: 10 children otherwise start 10 copies of each server.
 - `--no-skills` - Hide installed skills from the child. Use for tightly specified tasks that should rely only on the supplied prompt and files.
 - `--no-prompt-templates` - Disable prompt-template commands. Usually unnecessary, but useful when testing a minimal child environment.
 - `--no-context-files` - Ignore repository instruction files such as `AGENTS.md` and `CLAUDE.md`. Use only when those instructions would bias an independent investigation. Do not use for implementation unless intentionally bypassing repository guidance.
