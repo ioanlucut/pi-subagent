@@ -324,6 +324,8 @@ The end-to-end check runs the real extension in real Pi processes, with no model
 - `spawn --agent` and `--worktree` start a real child with the agent file's model, in the new worktree
 - parent quit suspends a running child and a queued one; a new parent on the same session resumes them through the queue
 
+CI runs `npm test` and then `npm run verify:e2e` on each push to `main` and each pull request, with Pi `1.5.2` (the version this package is tested with) and no login.
+
 It does not prove what a real model does with the skill and the tool, the Herdr panes, or how the widget looks in the terminal; `check:live` and use do.
 
 ```sh
