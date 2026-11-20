@@ -1248,6 +1248,7 @@ test("a child past its time limit is stopped by the parent tick and reported onc
 		stopTimedOutRuns(runs);
 		reportExitedRuns(runs);
 	}
+	await settleTmuxCalls();
 
 	const [run] = listRuns("parent");
 	const pending = pendingResults([run]);
