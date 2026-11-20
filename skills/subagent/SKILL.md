@@ -107,6 +107,7 @@ subagent rename <handle> "new name"
 
 # Idle: starts a new prompt. Busy: steers the current work.
 subagent send <handle> "message"
+# A message or prompt that starts with `--`: `send <handle> -- "--verbose please"`, `spawn --prompt="--force push"`.
 
 # Busy: waits until current work finishes, then starts another turn.
 subagent send <handle> --follow-up "message"

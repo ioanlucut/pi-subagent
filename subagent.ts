@@ -89,10 +89,10 @@ function usage(): never {
     [--cwd <dir>] [--worktree <topic> [--base <branch>]] [--tools <names>]
     [--no-extensions | --extensions <list>] [--no-mcp] [--no-skills]
     [--no-prompt-templates] [--no-context-files] [--timeout <duration>]
-    (--prompt <text> | --file <path>)...
+    (--prompt <text> | --prompt=<text> | --file <path>)...
   subagent status <handle>
   subagent rename <handle> <name>
-  subagent send <handle> [--follow-up] <message>
+  subagent send <handle> [--follow-up] [--] <message>
   subagent wait <handle> [--timeout <seconds>]
   subagent last <handle>
   subagent interrupt <handle>
@@ -283,7 +283,9 @@ function spawnSubagent(callerArgs: string[]): void {
 				break;
 			}
 			default:
-				fail(`Unknown spawn argument: ${arg}`);
+				// `--prompt=<text>` takes text that starts with `--`, which `--prompt <text>` refuses as a missing value.
+				if (arg.startsWith("--prompt=")) prompts.push(arg.slice("--prompt=".length));
+				else fail(`Unknown spawn argument: ${arg}`);
 		}
 	}
 
@@ -406,7 +408,12 @@ function sendSubagent(args: string[]): void {
 	if (!handle) usage();
 	let followUp = false;
 	const messageParts: string[] = [];
-	for (const arg of args) {
+	for (const [i, arg] of args.entries()) {
+		// After `--` all is message, so a message can start with `--`.
+		if (arg === "--") {
+			messageParts.push(...args.slice(i + 1));
+			break;
+		}
 		if (arg === "--follow-up") followUp = true;
 		else if (arg.startsWith("--")) fail(`Unknown send argument: ${arg}`);
 		else messageParts.push(arg);
