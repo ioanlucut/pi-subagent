@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -808,6 +808,20 @@ test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () =>
 	assert.match(outputs[2], /^Spawned c2 \(\w+\)\nState: queued, starts when fewer than 2 children run\n/);
 	await tick();
 	assert.equal(byName("c2").state, "queued", "no slot is free");
+});
+
+test("with a limit of 2, 5 spawns at the same time start 2 and queue 3", async () => {
+	const env = { ...process.env, ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), ...queueEnv };
+	const codes = await Promise.all(
+		Array.from({ length: 5 }, (_, i) => {
+			const child = spawn(process.execPath, [cli, "spawn", "--name", `c${i}`, "--cwd", root, "--prompt", "hi"], { env, stdio: "ignore" });
+			return new Promise<number | null>((done) => child.on("close", done));
+		}),
+	);
+
+	assert.deepEqual(codes, [0, 0, 0, 0, 0]);
+	const states = listRuns().map((run) => run.state);
+	assert.deepEqual([states.filter((state) => state === "starting").length, states.filter((state) => state === "queued").length], [2, 3]);
 });
 
 test("subagentLimit in Pi's settings limits a session to 2 children, and PI_SUBAGENT_LIMIT overrides it", () => {
