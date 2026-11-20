@@ -127,7 +127,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard. When `packages` has no guard, `spawn` prints a warning. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
-| `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch. Past it, the child is stopped and reported as `timed out`; its run and transcript stay. |
+| `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch and from each new turn of an idle child. A child still working past it is stopped and reported as `timed out`; its run and transcript stay. A child that answered and is idle is not stopped. |
 
 ## Agent files
 

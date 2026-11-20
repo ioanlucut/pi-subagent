@@ -138,11 +138,13 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 }
 
 /**
- * The parent tick and `wait` call this: a child still running past its deadline is stopped and reported
- * once as `timed out`. The run directory stays, so its transcript can show where the child was stuck.
+ * The parent tick and `wait` call this: a child still working (`starting` or `busy`) past its deadline is
+ * stopped and reported once as `timed out`. An idle child has answered, so it stays; a prompt that starts
+ * its next turn sets a new deadline. The run directory stays, so its transcript can show where the child was stuck.
  */
 export function stopTimedOutRuns(runs: RunMetadata[]): void {
 	for (const run of runs) {
+		if (run.state !== "starting" && run.state !== "busy") continue;
 		if (!run.deadline || run.timedOut || run.suspended || Date.now() < Date.parse(run.deadline)) continue;
 		if (isExitKnown(run.runDir) || effectiveRunState(run) === "exited") continue;
 		// First, so the aborted turn and the ended process are not reported as well.

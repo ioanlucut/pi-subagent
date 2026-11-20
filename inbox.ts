@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { inboxDir, updateMetadata, type InboxMessage } from "./shared.ts";
+import { inboxDir, nextDeadline, readMetadata, updateMetadata, type InboxMessage } from "./shared.ts";
 
 /** The child Pi, as far as inbox delivery needs it. */
 export interface InboxTarget {
@@ -64,7 +64,10 @@ export class InboxDelivery {
 				continue;
 			}
 
-			updateMetadata(this.runDir, { state: "busy", error: undefined });
+			// A prompt to an idle child starts a new turn: its time limit counts from now.
+			const metadata = idle ? readMetadata(this.runDir) : undefined;
+			const deadline = metadata && nextDeadline(metadata);
+			updateMetadata(this.runDir, { state: "busy", error: undefined, ...(deadline && { deadline }) });
 			try {
 				if (idle) {
 					this.promptPendingSince = now;
