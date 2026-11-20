@@ -9,7 +9,7 @@ import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
 import { claimSuspendedRun } from "./queue.ts";
 import { settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
-import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, suspendSessionRuns, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -181,6 +181,24 @@ test("a result that cannot be sent yet keeps the tick until it is sent", async (
 	const count = shown.length;
 	mock.timers.tick(5000);
 	assert.equal(shown.length, count);
+});
+
+test("a result of an exited child that the parent quit before sending arrives once after resume", async () => {
+	const { run, child } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	await kill(child);
+	updateMetadata(run.runDir, { state: "exited" });
+
+	await suspendSessionRuns("parent");
+	const { tick, sent } = parentTick();
+	tick.wake();
+	mock.timers.tick(3000);
+
+	assert.equal(sent.length, 1);
+	assert.equal(sent.join().split("the answer").length, 2, "the answer arrives once");
+	assert.match(sent[0], /^Subagent aaa111 finished\n\nthe answer\n\n---\n\nSubagent aaa111 exited\n/);
+	await suspendSessionRuns("parent");
+	assert.equal(existsSync(run.runDir), false, "the next quit removes the run, as it has nothing left to send");
 });
 
 test("a result held by a cancelled wait keeps the tick, and arrives when the wait's claim expires", async () => {

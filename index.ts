@@ -149,7 +149,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		let tick: SessionTick | undefined;
 
 		const showRows = (ctx: ExtensionContext, rows: { run: RunMetadata; state: RunState }[]): void => {
-			panes?.sync(rows);
+			// Returns at once: Herdr makes the pane changes in child processes.
+			void panes?.sync(rows);
 			if (rows.length === 0) {
 				ctx.ui.setWidget("subagents", undefined);
 				return;
@@ -213,11 +214,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			tick?.stop();
 			tick = undefined;
 			ctx.ui.setWidget("subagents", undefined);
-			panes?.closeAll();
-			if (event.reason === "reload") return;
+			const closed = panes?.closeAll();
+			if (event.reason === "reload") return closed;
 			// A child the tick is still starting must have its tmux session before the suspend looks for it.
 			await settleTmuxCalls();
-			await suspendSessionRuns(ctx.sessionManager.getSessionId());
+			await Promise.all([closed, suspendSessionRuns(ctx.sessionManager.getSessionId())]);
 		});
 		return;
 	}
@@ -283,8 +284,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => {
 		currentContext = ctx;
 		if (!ctx.isIdle()) return;
-		updateMetadata(runDir, { state: "idle" });
+		// The result first: a `stop` that sees `idle` then finds it, and prints it.
 		reportSettledTurn(runDir);
+		updateMetadata(runDir, { state: "idle" });
 	});
 
 	pi.on("session_shutdown", (event) => {
