@@ -827,6 +827,25 @@ test("list and status show a queued child as queued", () => {
 	assert.match(runCli(["status", byName("c2").handle], {}).stdout, /^c2 \(\w+\): queued /);
 });
 
+test("a queued child that fails to start is reported to the parent once, and wait prints the failure and exits 1", async () => {
+	spawnMany(3, queueEnv);
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	const failingTmux = join(root, "failing-tmux");
+	mkdirSync(failingTmux);
+	writeFileSync(join(failingTmux, "tmux"), "#!/bin/sh\necho 'no server' >&2\nexit 1\n", { mode: 0o755 });
+	const errors: string[] = [];
+	await withEnv({ PATH: `${failingTmux}:${basePath}`, PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, message) => errors.push(message)));
+	const queued = byName("c2");
+	assert.deepEqual(errors, ["no server"]);
+	assert.match(pendingResults([queued])?.text ?? "", new RegExp(`^Subagent c2 \\(${queued.handle}\\) failed to start\\n\\nno server$`));
+
+	const result = runCli(["wait", queued.handle], {});
+
+	assert.equal(result.status, 1, result.stderr);
+	assert.equal(result.stdout, `${queued.handle} failed to start\n\nno server\n`);
+	assert.equal(pendingResults([queued]), undefined, "wait printed it, so the parent is not told a second time");
+});
+
 test("stop removes a queued child, and it never starts", async () => {
 	spawnMany(3, queueEnv);
 	const queued = byName("c2");

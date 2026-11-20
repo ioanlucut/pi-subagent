@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
+import { clearResults, isExitKnown, markExitKnown, markWaiting } from "./outbox.ts";
 import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText } from "./queue.ts";
 import {
 	assistantText,
@@ -451,6 +451,13 @@ async function waitSubagent(args: string[]): Promise<void> {
 		}
 		const pending = inboxHasMessages(metadata.runDir);
 		const state = effectiveRunState(metadata);
+		// A queued launch that failed: the tick sent it as a result, which this prints instead.
+		if (state === "error" && isExitKnown(metadata.runDir)) {
+			process.stdout.write(`${handle} failed to start\n\n${metadata.error ?? ""}\n`);
+			process.exitCode = 1;
+			clearResults(metadata.runDir);
+			return;
+		}
 		if (state === "error") fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
 		if (metadata.hasStarted && state === "idle" && !pending) {

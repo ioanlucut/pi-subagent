@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
+import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
 	effectiveRunState,
 	getAgentDir,
@@ -91,7 +91,11 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 			return [started];
 		} catch (error) {
 			free--;
-			onError(run, error instanceof Error ? error.message : String(error));
+			const message = error instanceof Error ? error.message : String(error);
+			// Reported once here; known, so the tick neither keeps it nor reports it again (time limit included).
+			markExitKnown(run.runDir);
+			writeResult(run, "failed to start", message);
+			onError(run, message);
 			return [readMetadata(run.runDir) ?? run];
 		}
 	});
@@ -113,6 +117,8 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 			childPid: null,
 			childStarted: undefined,
 		}) ?? run;
+	// An earlier launch that failed was reported; the results of this one must be.
+	clearExitKnown(run.runDir);
 	// A child that never started still has the launch `spawn` saved, with its first prompt.
 	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(queued);
 	return queued;

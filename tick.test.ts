@@ -269,6 +269,18 @@ test("a queued child alone starts on wake", () => {
 	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
 });
 
+test("a queued child that fails to start gives the parent one message with the error, and the tick stops", () => {
+	writeFileSync(join(root, "bin", "tmux"), `#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\necho 'test launch failure' >&2\nexit 1\n`);
+	const { tick, shown, sent } = parentTick();
+	queuedRun("bbb222");
+
+	tick.wake();
+	mock.timers.tick(5000);
+
+	assert.deepEqual(sent, ["Subagent bbb222 failed to start\n\ntest launch failure"]);
+	assert.deepEqual(shown, [[]]);
+});
+
 test("wake while the tick runs starts no second timer", () => {
 	const { tick, shown } = parentTick();
 	liveRun("aaa111");
