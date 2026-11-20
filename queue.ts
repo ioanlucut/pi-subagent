@@ -14,6 +14,7 @@ import {
 	prepareLaunch,
 	readMetadata,
 	removeRunDir,
+	runDisplayName,
 	type RunMetadata,
 	skippingBusyRun,
 	startLaunch,
@@ -96,9 +97,19 @@ function countedUnderLock<T>(sessionId: string, runs: RunMetadata[], fn: (sessio
 	return withSessionLock(sessionId, () => fn((session) => sessions.get(session) ?? true));
 }
 
-/** The `State:` line that `spawn` and `resume` print. */
-export function stateLine(queued: boolean): string {
-	return `State: ${queued ? `queued, starts when fewer than ${runLimit()} children run` : "busy"}`;
+/**
+ * The `State:` line that `spawn` and `resume` print. A queued one names the idle children of `sessionId`: an
+ * idle child holds its slot until it is stopped, so a model that waits for the queue can wait for ever.
+ */
+export function stateLine(queued: boolean, sessionId: string | undefined): string {
+	// Only a run of a parent session queues.
+	if (!queued || sessionId === undefined) return "State: busy";
+	const line = `State: queued, starts when fewer than ${runLimit()} children run`;
+	const idle = listRuns(sessionId).filter((run) => effectiveRunState(run) === "idle");
+	if (idle.length === 0) return line;
+	const holders = idle.map(runDisplayName).join(", ");
+	const count = idle.length === 1 ? "1 idle child holds a slot" : `${idle.length} idle children hold slots`;
+	return `${line}. ${count}: ${holders}. Stop the ones you need no more to free a slot.`;
 }
 
 /**

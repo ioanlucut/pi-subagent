@@ -27,6 +27,7 @@ import {
 	pruneStaleRuns,
 	readMetadata,
 	removeRunDir,
+	type RunMetadata,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
 	suspendRuns,
@@ -761,6 +762,45 @@ test("spawn --worktree reuses a clean worktree of the same branch, and refuses o
 	assert.equal(readFileSync(join(worktree, "wip.txt"), "utf8"), "work\n");
 });
 
+function gitIn(cwd: string, ...args: string[]): void {
+	const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+	assert.equal(result.status, 0, result.stderr);
+}
+
+test("spawn --worktree takes a branch that exists and has no worktree, and ignores --base", async () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "integ");
+	gitIn(repo, "branch", "integ", "main");
+	gitIn(repo, "commit", "-q", "--allow-empty", "-m", "on other");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "integ", "--base", "other", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stderr, /branch integ exists; --base other is ignored/);
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "integ");
+	assert.equal(gitOut(worktree, "rev-parse", "HEAD"), gitOut(repo, "rev-parse", "main"), "the branch keeps its commits");
+	assert.equal((await childEnv(agentDir())).get("PWD"), worktree);
+});
+
+test("spawn --worktree fails for a branch checked out elsewhere, and names that path", () => {
+	const { repo, home } = gitRepo();
+	const elsewhere = join(root, "elsewhere");
+	gitIn(repo, "worktree", "add", "-q", "-b", "integ", elsewhere, "main");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "integ", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 1);
+	assert.ok(result.stderr.includes(`branch integ is checked out in ${realpathSync(elsewhere)}`), result.stderr);
+	assert.equal(listRuns().length, 0, "no child");
+	assert.equal(existsSync(join(home, "WORK", "dev", ".worktrees", "repo", "integ")), false);
+});
+
 test("PI_SUBAGENT_WORKTREE_ROOT moves the worktree root", async () => {
 	const { repo, home } = gitRepo();
 	const worktree = join(root, "trees", "repo", "t1");
@@ -891,6 +931,42 @@ test("when a child ends, the next tick starts the queued child with the caller's
 	assert.equal(tmuxSessionExists(queued.tmuxSession), true);
 	assert.match(await startedChild(queued), /^AWS_PROFILE=caller$/m);
 	assert.equal(JSON.parse(readFileSync(join(queued.runDir, "argv"), "utf8")).at(-1), "Task:\ntask 2");
+});
+
+/** With a limit of 1: spawn `c0`, wait until it runs, and make it idle with `answer` as its last turn. */
+async function idleFirstChild(answer: string): Promise<RunMetadata> {
+	spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+	const first = byName("c0");
+	await startedChild(first);
+	writeFileSync(first.sessionFile, `${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", content: [{ type: "text", text: answer }], stopReason: "stop" } })}\n`);
+	return updateMetadata(first.runDir, { state: "idle" })!;
+}
+
+test("a spawn that queues behind an idle child names it and says that stop frees its slot", async () => {
+	const idle = await idleFirstChild("Done.");
+
+	const [output] = spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+
+	assert.equal(
+		output.split("\n")[1],
+		`State: queued, starts when fewer than 1 children run. 1 idle child holds a slot: c0 (${idle.handle}). Stop the ones you need no more to free a slot.`,
+	);
+});
+
+test("a finished result says that stop frees the child's slot only while another child is queued", async () => {
+	const idle = await idleFirstChild("Done.");
+	const deliver = () => {
+		const pending = pendingResults([idle]);
+		for (const file of pending?.files ?? []) rmSync(file);
+		return pending?.text ?? "";
+	};
+
+	reportSettledTurn(idle.runDir);
+	assert.doesNotMatch(deliver(), /holds a slot/, "nothing waits for a slot");
+
+	spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+	reportSettledTurn(idle.runDir);
+	assert.match(deliver(), new RegExp(`\\]\\n\\nstop ${idle.handle} when you need no follow-up; it holds a slot until then\\.$`));
 });
 
 test("list and status show a queued child as queued", () => {
@@ -1327,6 +1403,27 @@ test("spawn --agent starts the child with the agent file's model, thinking, tool
 	assert.equal(args.at(-1), "Follow the brief.\n\nTask:\nhi");
 });
 
+test("an agent body that starts with - reaches the child as text after --, not as Pi options", async () => {
+	agentFile(join(agentDir(), "agents"), "reviewer", [], "- You review code.\n");
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "reviewer", "--prompt", "review"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.deepEqual(args.slice(args.indexOf("--")), ["--", "- You review code.\n\nTask:\nreview"]);
+});
+
+test("spawn --file still attaches the file, after --", async () => {
+	const notes = join(root, "notes.md");
+	writeFileSync(notes, "notes");
+
+	const result = runCli(["spawn", "--cwd", root, "--file", notes, "--prompt", "read it"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.deepEqual(args.slice(args.indexOf("--")), ["--", `@${notes}`, "Task:\nread it"]);
+});
+
 test("a flag on spawn overrides the agent file", async () => {
 	agentFile(join(agentDir(), "agents"), "implementer", ["model: anthropic/claude-x", "thinking: high"]);
 
@@ -1462,6 +1559,23 @@ test("each subagent tool action prints what the matching CLI command prints", as
 	assert.equal(stopped.isError, false, stopped.text);
 	assert.equal(stopped.text, "Stopped abc123");
 	assert.equal(listRuns("parent").length, 0);
+});
+
+test("the subagent tool passes a prompt and a message that start with -- as text", async () => {
+	const bin = fakePi(join(root, "bin"));
+	await withEnv(spawnEnv(agentDir(), bin), async () => {
+		const result = await runSubagentTool({ action: "spawn", prompt: "--force push" }, toolContext());
+		assert.equal(result.isError, false, result.text);
+	});
+	assert.equal((await childArgs(agentDir())).at(-1), "Task:\n--force push");
+	rmSync(join(agentDir(), "subagents"), { recursive: true });
+
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	const sent = await runSubagentTool({ action: "send", handle, message: "--verbose please" }, toolContext("parent"));
+	assert.equal(sent.isError, false, sent.text);
+	const inbox = join(agentDir(), "subagents", handle, "inbox");
+	const [file] = readdirSync(inbox);
+	assert.equal(JSON.parse(readFileSync(join(inbox, file), "utf8")).message, "--verbose please");
 });
 
 test("a child spawned with the subagent tool is suspended and resumed like a CLI child", async () => {

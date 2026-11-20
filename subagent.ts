@@ -89,10 +89,10 @@ function usage(): never {
     [--cwd <dir>] [--worktree <topic> [--base <branch>]] [--tools <names>]
     [--no-extensions | --extensions <list>] [--no-mcp] [--no-skills]
     [--no-prompt-templates] [--no-context-files] [--timeout <duration>]
-    (--prompt <text> | --file <path>)...
+    (--prompt <text> | --prompt=<text> | --file <path>)...
   subagent status <handle>
   subagent rename <handle> <name>
-  subagent send <handle> [--follow-up] <message>
+  subagent send <handle> [--follow-up] [--] <message>
   subagent wait <handle> [--timeout <seconds>]
   subagent last <handle>
   subagent interrupt <handle>
@@ -144,6 +144,8 @@ function git(cwd: string, args: string[]): string {
  * The worktree `<root>/<repo>/<topic>` on branch `<topic>`, made from `base`. The root is
  * `PI_SUBAGENT_WORKTREE_ROOT`, else `~/WORK/dev/.worktrees`, as the spec asks.
  * An existing path is reused only when it is a clean worktree of that branch, so no work is lost.
+ * An existing branch `<topic>` (a merger's integration branch, a re-spawn) gets the worktree as it is,
+ * unless another worktree has it checked out: Git allows a branch in one worktree only.
  */
 function prepareWorktree(repoDir: string, topic: string, base: string | undefined): string {
 	// The topic is one path segment; `git worktree add -b` rejects what is not a valid branch name.
@@ -163,6 +165,14 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 		return path;
 	}
 	mkdirSync(dirname(path), { recursive: true });
+	if (spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${topic}`], { cwd: repoDir }).status === 0) {
+		const entries = git(repoDir, ["worktree", "list", "--porcelain"]).split("\n\n");
+		const holder = entries.find((entry) => entry.split("\n").includes(`branch refs/heads/${topic}`));
+		if (holder) fail(`branch ${topic} is checked out in ${holder.split("\n")[0].replace(/^worktree /, "")}; use --cwd there, or free the branch`);
+		if (base !== undefined) process.stderr.write(`Note: branch ${topic} exists; --base ${base} is ignored\n`);
+		git(repoDir, ["worktree", "add", path, topic]);
+		return path;
+	}
 	git(repoDir, ["worktree", "add", "--no-track", "-b", topic, path, base ?? "HEAD"]);
 	return path;
 }
@@ -283,7 +293,9 @@ function spawnSubagent(callerArgs: string[]): void {
 				break;
 			}
 			default:
-				fail(`Unknown spawn argument: ${arg}`);
+				// `--prompt=<text>` takes text that starts with `--`, which `--prompt <text>` refuses as a missing value.
+				if (arg.startsWith("--prompt=")) prompts.push(arg.slice("--prompt=".length));
+				else fail(`Unknown spawn argument: ${arg}`);
 		}
 	}
 
@@ -363,7 +375,7 @@ function spawnSubagent(callerArgs: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued, metadata.parentSessionId)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 
@@ -406,7 +418,12 @@ function sendSubagent(args: string[]): void {
 	if (!handle) usage();
 	let followUp = false;
 	const messageParts: string[] = [];
-	for (const arg of args) {
+	for (const [i, arg] of args.entries()) {
+		// After `--` all is message, so a message can start with `--`.
+		if (arg === "--") {
+			messageParts.push(...args.slice(i + 1));
+			break;
+		}
 		if (arg === "--follow-up") followUp = true;
 		else if (arg.startsWith("--")) fail(`Unknown send argument: ${arg}`);
 		else messageParts.push(arg);
@@ -506,7 +523,7 @@ function resumeSubagent(args: string[]): void {
 	if (!prepared) fail(`${metadata.handle} is already resumed`);
 	const queued = prepared.state === "queued";
 	if (!queued) startRun(prepared);
-	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
+	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued, metadata.parentSessionId)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
 }
 
 function lastSubagent(args: string[]): void {

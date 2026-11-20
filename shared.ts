@@ -322,6 +322,8 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
 /**
  * Save the launch of a run for `startLaunch`, now or, for a queued run, later from the parent tick: the
  * child still gets the environment of the `spawn` caller. `initialArgs` are only passed on first spawn.
+ * They go after `--`: Pi reads a positional that starts with `-` as an option, so an agent body
+ * `--approve` would make the child trust a cloned repository and run its extensions.
  */
 export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
 	// A file in the working directory must not choose the program: a cloned repository could.
@@ -340,6 +342,7 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 			"--thinking",
 			metadata.thinking,
 			...(metadata.launchArgs ?? []),
+			"--",
 			...initialArgs,
 		],
 	);
