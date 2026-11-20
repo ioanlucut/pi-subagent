@@ -1104,7 +1104,23 @@ test("a project agent file overrides a global one with the same name", async () 
 	assert.equal(flagValue(await childArgs(agentDir()), "--model"), "project-model");
 });
 
-test("agents lists the name and description of each agent, a project one in place of a global one", () => {
+test("a project agent file cannot load extensions or drop the command guard, and spawn warns once naming it", async () => {
+	installGuard();
+	const project = join(root, "project");
+	agentFile(join(project, ".pi", "agents"), "reviewer", ["extensions: payload.ts, -cc-safety-net", "tools: read"]);
+	const file = join(realpathSync(project), ".pi", "agents", "reviewer.md");
+
+	const result = runCliIn(project, ["spawn", "--agent", "reviewer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, `Warning: ignored the extensions of the project agent file ${file}; only a global agent file or --extensions on spawn can load extensions\n`);
+	const args = await childArgs(agentDir());
+	assert.equal(args.includes("--no-extensions"), false);
+	assert.deepEqual(extensionFlags(args), []);
+	assert.equal(flagValue(args, "--tools"), "read");
+});
+
+test("agents lists the name, scope, and description of each agent, a project one in place of a global one", () => {
 	const project = join(root, "project");
 	agentFile(join(agentDir(), "agents"), "reviewer", ["description: Reviews a change"]);
 	agentFile(join(agentDir(), "agents"), "implementer", ["description: Global implementer"]);
@@ -1113,7 +1129,7 @@ test("agents lists the name and description of each agent, a project one in plac
 	const result = runCliIn(project, ["agents"], { PI_CODING_AGENT_DIR: agentDir() });
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.equal(result.stdout, "implementer  Implements one ticket\nreviewer  Reviews a change\n");
+	assert.equal(result.stdout, "implementer  project  Implements one ticket\nreviewer  global  Reviews a change\n");
 });
 
 test("spawn --agent with an unknown name fails and starts nothing", () => {
