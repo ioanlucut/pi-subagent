@@ -6,6 +6,7 @@ import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbo
 import {
 	effectiveRunState,
 	getAgentDir,
+	inStartingGrace,
 	isLive,
 	listRuns,
 	nextDeadline,
@@ -49,26 +50,41 @@ export function mustQueue(sessionId: string | undefined, sessionExists = tmuxSes
  * Write a new run as `queued` when it must queue, else `starting`, and return whether it queued. The count
  * and the write hold the session lock: two `spawn` at once must not both see the last free slot. A
  * `starting` run holds its slot from this write, so its slow tmux start can follow outside the lock.
+ */
+export function writeNewRun(run: RunMetadata): boolean {
+	return countedWrite(run.parentSessionId, (queued) => {
+		writeMetadata({ ...run, state: queued ? "queued" : "starting" });
+		return queued;
+	});
+}
+
+/**
+ * `subagent resume`: claim a suspended run, `queued` when `mayQueue` and it must queue, else `starting` for
+ * `startRun`. The count and the claim hold the session lock, as for `spawn`: two resumes at once must not
+ * both see the last free slot. Undefined when another resume claimed the run first.
+ */
+export function resumeRun(run: RunMetadata, mayQueue: boolean, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
+	return countedWrite(run.parentSessionId, (queued) => claimSuspendedRun(run, mayQueue && queued ? "queued" : "starting", patch));
+}
+
+/**
+ * Run `write` with whether a new live run of `sessionId` must queue, under the session lock.
  *
  * The lock holds for milliseconds and starts no program: a run of an older version, which only tmux can
  * tell alive, is asked before it. A run that appears in between counts as live, which can only queue.
  */
-export function writeNewRun(run: RunMetadata): boolean {
+function countedWrite<T>(sessionId: string | undefined, write: (queued: boolean) => T): T {
 	const sessions = new Map<string, boolean>();
-	if (run.parentSessionId !== undefined && process.env.PI_SUBAGENT_QUEUE === "1") {
-		for (const other of listRuns(run.parentSessionId)) {
+	if (sessionId !== undefined && process.env.PI_SUBAGENT_QUEUE === "1") {
+		for (const other of listRuns(sessionId)) {
 			effectiveRunState(other, (session) => {
 				sessions.set(session, tmuxSessionExists(session));
 				return sessions.get(session) as boolean;
 			});
 		}
 	}
-	const write = () => {
-		const queued = mustQueue(run.parentSessionId, (session) => sessions.get(session) ?? true);
-		writeMetadata({ ...run, state: queued ? "queued" : "starting" });
-		return queued;
-	};
-	return run.parentSessionId === undefined ? write() : withSessionLock(run.parentSessionId, write);
+	const locked = () => write(mustQueue(sessionId, (session) => sessions.get(session) ?? true));
+	return sessionId === undefined ? locked() : withSessionLock(sessionId, locked);
 }
 
 /** The `State:` line that `spawn` and `resume` print. */
@@ -149,23 +165,32 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Put a suspended run in the queue, with the caller's environment for its launch. It stays `suspended`
- * until `startRun` launches it, so a launch that fails is tried again on the next resume.
+ * Claim a suspended run for a launch, with the caller's `patch`: `queued` for the tick, or `starting` for
+ * `startRun`. It stays `suspended` until `startRun` launches it, so a launch that fails is tried again on
+ * the next resume. Undefined when another resume, of a parent or of `subagent resume`, claimed it first: a
+ * second launch would fail on the tmux session and mark the live run `error`.
  */
-export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata {
-	const queued =
-		updateMetadata(run.runDir, {
+export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting", patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
+	let claimed = false;
+	const next = updateMetadata(run.runDir, (current) => {
+		// Claimed: `queued`, or `starting` with no process yet. Past the grace time, its claimer died before the launch.
+		const taken = current.state === "queued" || (current.childPid === null && inStartingGrace(current));
+		claimed = current.suspended === true && !taken;
+		if (!claimed) return undefined;
+		return {
 			...patch,
-			state: "queued",
+			state,
 			error: undefined,
 			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
 			childPid: null,
-		}) ?? run;
+		};
+	});
+	if (!next || !claimed) return undefined;
 	// An earlier launch that failed was reported; the results of this one must be.
 	clearExitKnown(run.runDir);
 	// A child that never started still has the launch `spawn` saved, with its first prompt.
-	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(queued);
-	return queued;
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(next);
+	return next;
 }
 
 /**
@@ -182,7 +207,7 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 			continue;
 		}
 		if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) > RESUME_WINDOW_MS) continue;
-		queueSuspendedRun(run);
+		claimSuspendedRun(run, "queued");
 	}
 	startQueuedRuns(listRuns(sessionId), onError);
 }
