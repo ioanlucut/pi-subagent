@@ -819,15 +819,13 @@ test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () =>
 });
 
 test("with a limit of 2, 5 spawns at the same time start 2 and queue 3", async () => {
-	const env = { ...process.env, ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), ...queueEnv };
-	const codes = await Promise.all(
-		Array.from({ length: 5 }, (_, i) => {
-			const child = spawn(process.execPath, [cli, "spawn", "--name", `c${i}`, "--cwd", root, "--prompt", "hi"], { env, stdio: "ignore" });
-			return new Promise<number | null>((done) => child.on("close", done));
-		}),
+	// Each holds before its first lock until all 5 have come there: without the session lock, all 5 count first.
+	const results = await cliAtOnce(
+		Array.from({ length: 5 }, (_, i) => ["spawn", "--name", `c${i}`, "--cwd", root, "--prompt", "hi"]),
+		{ ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), ...queueEnv },
 	);
 
-	assert.deepEqual(codes, [0, 0, 0, 0, 0]);
+	assert.deepEqual(results.map((result) => result.code), [0, 0, 0, 0, 0], results.map((result) => result.out).join());
 	const states = listRuns().map((run) => run.state);
 	assert.deepEqual([states.filter((state) => state === "starting").length, states.filter((state) => state === "queued").length], [2, 3]);
 });
