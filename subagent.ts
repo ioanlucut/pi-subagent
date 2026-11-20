@@ -340,15 +340,16 @@ function spawnSubagent(callerArgs: string[]): void {
 		createdAt: now,
 		updatedAt: now,
 	};
-	const queued = writeNewRun(metadata);
-	metadata.state = queued ? "queued" : "starting";
-
 	const initialArgs = files.map((file) => `@${file}`);
 	const task = prompts.length > 0 ? `Task:\n${prompts.join("\n\n")}` : undefined;
 	const firstPrompt = [instructions, task].filter(Boolean).join("\n\n");
 	if (firstPrompt) initialArgs.push(firstPrompt);
+	let queued = false;
 	try {
+		// The launch first: from the metadata write on, a parent tick can start a queued run.
 		prepareLaunch(metadata, initialArgs);
+		queued = writeNewRun(metadata);
+		metadata.state = queued ? "queued" : "starting";
 		if (!queued) startRun(metadata);
 	} catch (error) {
 		removeRunDir(runDir);

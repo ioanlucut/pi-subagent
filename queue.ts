@@ -125,6 +125,8 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	let free = runLimit() - liveRunCount(runs);
 	return runs.flatMap((run) => {
 		if (free <= 0 || run.state !== "queued") return [run];
+		// Its `spawn` or `resume` has not saved the launch yet: tmux would start nothing. A later tick starts it.
+		if (!existsSync(join(run.runDir, "launch.json"))) return [run];
 		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
 		try {
 			const started = startRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
@@ -153,6 +155,9 @@ const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
  * until `startRun` launches it, so a launch that fails is tried again on the next resume.
  */
 export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata {
+	// A child that never started still has the launch `spawn` saved, with its first prompt. The launch first:
+	// from the `queued` write on, a parent tick can start the run.
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run);
 	const queued =
 		updateMetadata(run.runDir, {
 			...patch,
@@ -163,8 +168,6 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 		}) ?? run;
 	// An earlier launch that failed was reported; the results of this one must be.
 	clearExitKnown(run.runDir);
-	// A child that never started still has the launch `spawn` saved, with its first prompt.
-	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(queued);
 	return queued;
 }
 

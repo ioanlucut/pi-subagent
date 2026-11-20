@@ -1044,6 +1044,104 @@ test("subagent resume with no parent tick starts the child at once", async () =>
 	assert.equal(runCli(["resume", handle], {}).status, 1, "a running child cannot be resumed");
 });
 
+/** Run the CLI with `args`, held just before it writes `launch.json`, and call `during` while it is held. */
+async function withLaunchHeld(args: string[], env: NodeJS.ProcessEnv, during: () => Promise<void>): Promise<void> {
+	const barrier = join(root, "barrier");
+	mkdirSync(barrier);
+	const hook = join(root, "hold-launch.mjs");
+	writeFileSync(
+		hook,
+		`import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const write = fs.writeFileSync;
+fs.writeFileSync = (path, ...rest) => {
+	if (String(path).endsWith("/launch.json")) {
+		write(${JSON.stringify(join(barrier, "ready"))}, "");
+		const end = Date.now() + 15000;
+		while (!fs.existsSync(${JSON.stringify(join(barrier, "go"))}) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+	}
+	return write(path, ...rest);
+};
+syncBuiltinESMExports();
+`,
+	);
+	const child = spawn(process.execPath, ["--import", hook, cli, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "pipe"] });
+	let stderr = "";
+	child.stderr.on("data", (chunk) => (stderr += chunk));
+	const closed = new Promise<number | null>((done) => child.on("close", done));
+	const deadline = Date.now() + 10000;
+	while (!existsSync(join(barrier, "ready"))) {
+		assert.ok(Date.now() < deadline, "the CLI did not reach the launch write");
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+	}
+	try {
+		await during();
+	} finally {
+		writeFileSync(join(barrier, "go"), "");
+	}
+	assert.equal(await closed, 0, stderr);
+}
+
+/** The parent tick, with a `tmux` that records each subcommand it gets; returns them. */
+async function tickWithRecordedTmux(): Promise<string[]> {
+	const bin = join(root, "recording-tmux");
+	const calls = join(root, "tmux-calls");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "tmux"), `#!/bin/sh\necho "$1" >> "${calls}"\nexec "${spawnSync("which", ["tmux"], { encoding: "utf8" }).stdout.trim()}" "$@"\n`, { mode: 0o755 });
+	rmSync(calls, { force: true });
+	await withEnv({ PATH: `${bin}:${basePath}` }, tick);
+	return existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [];
+}
+
+test("a tick does not start a spawn before its launch is saved; after it is, the child starts", async () => {
+	spawnMany(2, queueEnv);
+	const bin = fakePi(join(root, "bin"));
+
+	await withLaunchHeld(["spawn", "--name", "late", "--cwd", root, "--prompt", "late task"], { ...spawnEnv(agentDir(), bin), ...queueEnv }, async () => {
+		assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+		assert.deepEqual((await tickWithRecordedTmux()).filter((call) => call === "new-session"), []);
+	});
+
+	await tick();
+	const started = byName("late");
+	assert.equal(started.state, "starting");
+	await startedChild(started);
+	assert.equal(JSON.parse(readFileSync(join(started.runDir, "argv"), "utf8")).at(-1), "Task:\nlate task");
+});
+
+test("a queued resume is not started before its launch is saved; after it is, the next tick starts it", async () => {
+	const handle = await oldSuspendedChild();
+	// As a child that started: its launcher took the file, so resume saves a new one.
+	rmSync(join(byName("old").runDir, "launch.json"), { force: true });
+	spawnMany(2, queueEnv);
+
+	await withLaunchHeld(["resume", handle], { ...spawnEnv(agentDir(), join(root, "bin")), ...queueEnv }, async () => {
+		assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+		assert.deepEqual((await tickWithRecordedTmux()).filter((call) => call === "new-session"), []);
+	});
+
+	assert.equal(byName("old").state, "queued");
+	await tick();
+	assert.equal(byName("old").state, "starting");
+	await startedChild(byName("old"));
+});
+
+test("the tick skips a queued run with no saved launch until the launch exists", async () => {
+	spawnMany(3, queueEnv);
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	const launch = join(byName("c2").runDir, "launch.json");
+	const saved = readFileSync(launch);
+	rmSync(launch);
+
+	assert.deepEqual((await tickWithRecordedTmux()).filter((call) => call === "new-session"), []);
+	assert.equal(byName("c2").state, "queued");
+
+	writeFileSync(launch, saved, { mode: 0o600 });
+	await tick();
+	assert.equal(byName("c2").state, "starting");
+	await startedChild(byName("c2"));
+});
+
 test("a guarded timer callback that throws does not throw, logs once, and runs again on the next tick", () => {
 	const logged: string[] = [];
 	const error = console.error;
