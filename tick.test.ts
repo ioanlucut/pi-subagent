@@ -338,6 +338,28 @@ test("two ticks that both list one queued run start it once, and the run stays l
 	assert.equal(readMetadata(run.runDir)?.state, "starting");
 });
 
+test("a tick waits about 200 ms for a run lock a stalled process holds, and starts the run on a later tick", async () => {
+	const run = queuedRun("bbb222");
+	// A live process that holds the run's lock, as a CLI stopped with Ctrl-Z would.
+	const lock = join(run.runDir, "metadata.lock");
+	const holder = spawn("sleep", ["60"], { stdio: "ignore" });
+	children.push(holder);
+	writeFileSync(lock, `${holder.pid} stalled`);
+	const { tick } = parentTick();
+
+	const before = Date.now();
+	tick.wake();
+	const blocked = Date.now() - before;
+
+	assert.ok(blocked >= 200 && blocked < 600, `blocked ${blocked} ms`);
+	assert.deepEqual(started(), []);
+	assert.equal(readMetadata(run.runDir)?.state, "queued", "nothing changed");
+	await kill(holder);
+	mock.timers.tick(1000);
+	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+	assert.equal(existsSync(lock), false);
+});
+
 test("wake while the tick runs starts no second timer", () => {
 	const { tick, shown } = parentTick();
 	liveRun("aaa111");

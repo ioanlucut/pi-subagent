@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { LockBusyError } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
 	effectiveRunState,
 	getAgentDir,
 	isLive,
 	listRuns,
+	nextDeadline,
 	ownStartTime,
 	prepareLaunch,
 	readMetadata,
@@ -37,20 +39,32 @@ export function runLimit(): number {
  * Whether a new child of `sessionId` must queue: the limit is reached, or older children wait. Only a parent
  * Pi whose tick starts queued runs sets PI_SUBAGENT_QUEUE; elsewhere nothing would start them.
  */
-export function mustQueue(sessionId: string | undefined): boolean {
+export function mustQueue(sessionId: string | undefined, sessionExists = tmuxSessionExists): boolean {
 	if (process.env.PI_SUBAGENT_QUEUE !== "1" || sessionId === undefined) return false;
 	const runs = listRuns(sessionId);
-	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
+	return runs.some((run) => run.state === "queued") || liveRunCount(runs, sessionExists) >= runLimit();
 }
 
 /**
  * Write a new run as `queued` when it must queue, else `starting`, and return whether it queued. The count
  * and the write hold the session lock: two `spawn` at once must not both see the last free slot. A
  * `starting` run holds its slot from this write, so its slow tmux start can follow outside the lock.
+ *
+ * The lock holds for milliseconds and starts no program: a run of an older version, which only tmux can
+ * tell alive, is asked before it. A run that appears in between counts as live, which can only queue.
  */
 export function writeNewRun(run: RunMetadata): boolean {
+	const sessions = new Map<string, boolean>();
+	if (run.parentSessionId !== undefined && process.env.PI_SUBAGENT_QUEUE === "1") {
+		for (const other of listRuns(run.parentSessionId)) {
+			effectiveRunState(other, (session) => {
+				sessions.set(session, tmuxSessionExists(session));
+				return sessions.get(session) as boolean;
+			});
+		}
+	}
 	const write = () => {
-		const queued = mustQueue(run.parentSessionId);
+		const queued = mustQueue(run.parentSessionId, (session) => sessions.get(session) ?? true);
 		writeMetadata({ ...run, state: queued ? "queued" : "starting" });
 		return queued;
 	};
@@ -81,7 +95,9 @@ export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): Ru
 		claimed = current.state === run.state;
 		if (!claimed) return undefined;
 		suspended = current.suspended;
-		return { ...patch, state: "starting", suspended: undefined };
+		// The limit counts from each launch, so a resumed or queued child is not stopped for the time it did
+		// not run. In the claim, so no second lock wait follows it.
+		return { ...patch, state: "starting", suspended: undefined, deadline: nextDeadline(current) };
 	});
 	if (!starting || !claimed) return starting;
 	try {
@@ -95,8 +111,8 @@ export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): Ru
 	return readMetadata(run.runDir) ?? starting;
 }
 
-function liveRunCount(runs: RunMetadata[]): number {
-	return runs.filter((run) => isLive(effectiveRunState(run))).length;
+function liveRunCount(runs: RunMetadata[], sessionExists = tmuxSessionExists): number {
+	return runs.filter((run) => isLive(effectiveRunState(run, sessionExists))).length;
 }
 
 /**
@@ -117,6 +133,8 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 			free--;
 			return [started];
 		} catch (error) {
+			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
+			if (error instanceof LockBusyError) return [run];
 			free--;
 			const message = error instanceof Error ? error.message : String(error);
 			// Reported once here; known, so the tick neither keeps it nor reports it again (time limit included).
@@ -179,9 +197,15 @@ export function stopTimedOutRuns(runs: RunMetadata[]): void {
 		if (run.state !== "starting" && run.state !== "busy") continue;
 		if (!run.deadline || run.timedOut || run.suspended || Date.now() < Date.parse(run.deadline)) continue;
 		if (isExitKnown(run.runDir) || effectiveRunState(run) === "exited") continue;
-		// First, so the aborted turn and the ended process are not reported as well.
+		try {
+			updateMetadata(run.runDir, { timedOut: true });
+		} catch (error) {
+			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
+			if (error instanceof LockBusyError) continue;
+			throw error;
+		}
+		// Before the kill, so the aborted turn and the ended process are not reported as well.
 		markExitKnown(run.runDir);
-		updateMetadata(run.runDir, { timedOut: true });
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 		writeResult(run, "timed out", timedOutText(run));
 	}

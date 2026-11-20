@@ -347,10 +347,6 @@ export function nextDeadline(metadata: RunMetadata): string | undefined {
 
 /** Start the tmux session of a run whose launch `prepareLaunch` saved. */
 export function startLaunch(metadata: RunMetadata): void {
-	// The limit counts from each launch, so a resumed or queued child is not stopped for the time it did not run.
-	// Written before tmux starts the child, which writes this file too.
-	const deadline = nextDeadline(metadata);
-	if (deadline) updateMetadata(metadata.runDir, { deadline });
 	const launchFile = join(metadata.runDir, "launch.json");
 	const result = spawnSync(
 		"tmux",
@@ -423,15 +419,15 @@ export function holdAliveFifo(runDir: string): void {
  * not recorded its ID yet lives while it is in its grace time. Only a run from an older version, with no
  * `childPid` field or no FIFO, asks tmux.
  */
-function childIsAlive(metadata: RunMetadata): boolean {
-	if (metadata.childPid === undefined) return tmuxSessionExists(metadata.tmuxSession);
+function childIsAlive(metadata: RunMetadata, sessionExists: (session: string) => boolean): boolean {
+	if (metadata.childPid === undefined) return sessionExists(metadata.tmuxSession);
 	if (metadata.childPid === null) return inStartingGrace(metadata);
 	try {
 		closeSync(openSync(aliveFifoPath(metadata.runDir), constants.O_WRONLY | constants.O_NONBLOCK));
 		return true;
 	} catch (error) {
 		// ENXIO: no process holds it. ENOENT: a child of an older version, which made no FIFO.
-		return (error as NodeJS.ErrnoException).code === "ENOENT" && tmuxSessionExists(metadata.tmuxSession);
+		return (error as NodeJS.ErrnoException).code === "ENOENT" && sessionExists(metadata.tmuxSession);
 	}
 }
 
@@ -440,8 +436,9 @@ export function isLive(state: RunState): boolean {
 	return state === "starting" || state === "busy" || state === "idle";
 }
 
-export function effectiveRunState(metadata: RunMetadata): RunState {
-	return isLive(metadata.state) && !childIsAlive(metadata) ? "exited" : metadata.state;
+/** `sessionExists` answers for a run of an older version, which only tmux can tell: by default, it asks tmux. */
+export function effectiveRunState(metadata: RunMetadata, sessionExists = tmuxSessionExists): RunState {
+	return isLive(metadata.state) && !childIsAlive(metadata, sessionExists) ? "exited" : metadata.state;
 }
 
 export function listRuns(parentSessionId?: string): RunMetadata[] {

@@ -1,4 +1,5 @@
 import { rmSync } from "node:fs";
+import { waitingAtMost } from "./lock.ts";
 import { hasResults, isExitKnown, pendingResults, reportExitedRuns } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
@@ -13,6 +14,9 @@ export interface SessionTickOptions {
 	onStartError?: (run: RunMetadata, message: string) => void;
 }
 
+/** All lock waits of one tick together; a real hold takes a few ms. */
+const TICK_LOCK_WAIT_MS = 200;
+
 /**
  * The parent's one-second work, run only while the session has children, queued ones included: a Pi
  * with no children reads no file and starts no program each second. It starts queued children when a
@@ -23,8 +27,9 @@ export class SessionTick {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly options: SessionTickOptions;
 	// An error keeps the timer, so the next tick tries again.
+	// A lock held by a stalled process makes a tick give up its work on that run, not block Pi's UI thread.
 	private readonly tick = guarded("subagent tick", () => {
-		if (!this.run()) this.stop();
+		if (!waitingAtMost(TICK_LOCK_WAIT_MS, () => this.run())) this.stop();
 	});
 
 	constructor(options: SessionTickOptions) {
