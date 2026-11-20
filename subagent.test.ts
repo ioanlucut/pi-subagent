@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
-import { resumeSuspendedRuns, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { resumeSuspendedRuns, settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
 import {
 	claimRunDir,
@@ -222,6 +222,7 @@ test("a failed relaunch leaves no launch file with the caller's environment behi
 
 	try {
 		resumeSuspendedRuns("parent-session", (_run, message) => errors.push(message));
+		await settleTmuxCalls();
 	} finally {
 		process.env.PATH = path;
 	}
@@ -286,6 +287,7 @@ test("a resumed orphan belongs to the new parent, so the next sweep leaves it ru
 	await suspendOrphanedRuns();
 
 	resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
+	await settleTmuxCalls();
 	await suspendOrphanedRuns();
 
 	const [run] = listRuns();
@@ -300,6 +302,7 @@ test("a resumed child is starting, not exited, before its new process records it
 	await suspendRuns([run]);
 
 	resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
+	await settleTmuxCalls();
 
 	assert.equal(effectiveRunState(listRuns()[0]), "starting");
 });
@@ -672,6 +675,7 @@ test("a suspended light child relaunches with the same flags", async () => {
 	await withEnv({ PATH: `${bin}:${basePath}` }, () =>
 		resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error)),
 	);
+	await settleTmuxCalls();
 
 	const relaunched = await childArgs(agentDir());
 	assert.deepEqual(extensionFlags(relaunched), extensionFlags(first));
@@ -799,7 +803,10 @@ async function startedChild(run: { runDir: string }): Promise<string> {
 }
 
 /** The parent tick, in a Pi started with a limit of 2. */
-const tick = () => withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, error) => assert.fail(error)));
+const tick = async () => {
+	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, error) => assert.fail(error)));
+	await settleTmuxCalls();
+};
 
 test("with a limit of 2, spawning 3 children starts 2 and queues 1", async () => {
 	const outputs = spawnMany(3, queueEnv);
@@ -890,6 +897,7 @@ test("a queued child that fails to start is reported to the parent once, and wai
 	writeFileSync(join(failingTmux, "tmux"), "#!/bin/sh\necho 'no server' >&2\nexit 1\n", { mode: 0o755 });
 	const errors: string[] = [];
 	await withEnv({ PATH: `${failingTmux}:${basePath}`, PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, message) => errors.push(message)));
+	await settleTmuxCalls();
 	const queued = byName("c2");
 	assert.deepEqual(errors, ["no server"]);
 	assert.match(pendingResults([queued])?.text ?? "", new RegExp(`^Subagent c2 \\(${queued.handle}\\) failed to start\\n\\nno server$`));
@@ -944,6 +952,7 @@ test("resuming a session with 6 suspended children and a limit of 2 starts 2 and
 	await suspendRuns(listRuns());
 
 	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+	await settleTmuxCalls();
 
 	const runs = listRuns();
 	assert.deepEqual(runs.map((run) => [run.name, run.state]), [["c0", "starting"], ["c1", "starting"], ["c2", "queued"], ["c3", "queued"], ["c4", "queued"], ["c5", "queued"]]);
@@ -956,6 +965,7 @@ test("a child suspended 25 hours ago stays suspended after resume, and list show
 	updateMetadata(byName("c0").runDir, { suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
 
 	resumeSuspendedRuns("parent", (_run, error) => assert.fail(error));
+	await settleTmuxCalls();
 
 	assert.equal(tmuxSessionExists(byName("c0").tmuxSession), false);
 	assert.equal(byName("c0").suspended, true);
@@ -970,6 +980,7 @@ test("a queued child is suspended when its parent quits: after 25 h it stays sus
 	updateMetadata(byName("c2").runDir, { suspendedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
 
 	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+	await settleTmuxCalls();
 
 	assert.equal(tmuxSessionExists(byName("c2").tmuxSession), false);
 	assert.match(runCli(["list"], { PI_SESSION_ID: "parent" }).stdout, /^c2 \(\w+\)  suspended  /m);
@@ -989,6 +1000,7 @@ test("a suspended queued child with a saved launch but no transcript is queued o
 	for (const file of [gone.sessionFile, join(gone.runDir, "launch.json")]) rmSync(file, { force: true });
 
 	await withEnv({ PI_SUBAGENT_LIMIT: "2" }, () => resumeSuspendedRuns("parent", (_run, error) => assert.fail(error)));
+	await settleTmuxCalls();
 
 	assert.equal(byName("c2")?.state, "starting", "its saved launch keeps the task");
 	assert.equal(existsSync(gone.runDir), false, "nothing to start it with");
@@ -1236,6 +1248,7 @@ test("a child past its time limit is stopped by the parent tick and reported onc
 		stopTimedOutRuns(runs);
 		reportExitedRuns(runs);
 	}
+	await settleTmuxCalls();
 
 	const [run] = listRuns("parent");
 	const pending = pendingResults([run]);
@@ -1432,6 +1445,7 @@ test("a child spawned with the subagent tool is suspended and resumed like a CLI
 		assert.equal(readMetadata(run.runDir)?.suspended, true);
 		rmSync(join(run.runDir, "probe"));
 		resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
+		await settleTmuxCalls();
 
 		const relaunched = await childArgs(agentDir());
 		assert.ok(relaunched.includes("--no-mcp"));

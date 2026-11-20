@@ -17,6 +17,9 @@ const POLL_MS = 5;
 /** A real hold takes a few ms; a waiter outside the parent tick waits this long, then gives up and changes nothing. */
 const TIMEOUT_MS = 6000;
 
+/** All lock waits of one parent tick together, on Pi's UI thread; a real hold takes a few ms. */
+export const TICK_LOCK_WAIT_MS = 200;
+
 /** Thrown when another live holder keeps the lock past the waiter's time: nothing was changed. */
 export class LockBusyError extends Error {}
 

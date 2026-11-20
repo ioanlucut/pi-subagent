@@ -24,7 +24,7 @@ import {
 	updateMetadata,
 } from "./shared.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
-import { resumeSuspendedRuns } from "./queue.ts";
+import { resumeSuspendedRuns, settleTmuxCalls } from "./queue.ts";
 import { SessionTick } from "./tick.ts";
 import { runSubagentTool } from "./tool.ts";
 import { SubagentToolSchema } from "./tool-schema.ts";
@@ -215,6 +215,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			ctx.ui.setWidget("subagents", undefined);
 			panes?.closeAll();
 			if (event.reason === "reload") return;
+			// A child the tick is still starting must have its tmux session before the suspend looks for it.
+			await settleTmuxCalls();
 			await suspendSessionRuns(ctx.sessionManager.getSessionId());
 		});
 		return;

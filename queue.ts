@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { LockBusyError } from "./lock.ts";
+import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
 	effectiveRunState,
@@ -16,6 +16,7 @@ import {
 	removeRunDir,
 	type RunMetadata,
 	startLaunch,
+	startLaunchAsync,
 	tmuxSessionExists,
 	updateMetadata,
 	withSessionLock,
@@ -96,15 +97,32 @@ export function stateLine(queued: boolean): string {
  * Start a run whose launch is saved: mark it `starting`, with `patch`, and start its tmux session. A launch
  * that fails leaves the run `error` and throws. Returns the run as it is after the start, or undefined when
  * `stop` removed it.
- *
- * A resumed run is no longer `suspended` from here: the time limit skips suspended runs, so a child that is
- * slow to start, or never starts, would otherwise pass its deadline unseen.
- *
- * Only a run still in the state the caller read is claimed, under its lock: two parents, or a tick and
- * `subagent resume`, can both read one run as `queued`. The one that loses starts nothing and gets the run
- * as the winner left it; a second launch would fail on the tmux session and mark the live run `error`.
  */
 export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
+	const claim = claimRun(run, patch);
+	if (!claim.claimed) return claim.run;
+	try {
+		startLaunch(claim.run);
+	} catch (error) {
+		launchFailed(claim, error);
+		throw error;
+	}
+	// Read again: the launch wrote a new deadline.
+	return readMetadata(run.runDir) ?? claim.run;
+}
+
+type Claim = { claimed: false; run: RunMetadata | undefined } | { claimed: true; run: RunMetadata; suspended: boolean | undefined };
+
+/**
+ * Mark a run `starting`, with `patch`, if it is still in the state the caller read. A resumed run is no longer
+ * `suspended` from here: the time limit skips suspended runs, so a child that is slow to start, or never
+ * starts, would otherwise pass its deadline unseen.
+ *
+ * Under its lock: two parents, or a tick and `subagent resume`, can both read one run as `queued`. The one
+ * that loses starts nothing and gets the run as the winner left it; a second launch would fail on the tmux
+ * session and mark the live run `error`.
+ */
+function claimRun(run: RunMetadata, patch: Partial<RunMetadata>): Claim {
 	let claimed = false;
 	let suspended: boolean | undefined;
 	const starting = updateMetadata(run.runDir, (current) => {
@@ -115,16 +133,32 @@ export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): Ru
 		// not run. In the claim, so no second lock wait follows it.
 		return { ...patch, state: "starting", suspended: undefined, deadline: nextDeadline(current) };
 	});
-	if (!starting || !claimed) return starting;
-	try {
-		startLaunch(starting);
-	} catch (error) {
-		// Still suspended, so the next resume tries it again.
-		updateMetadata(run.runDir, { state: "error", suspended, error: error instanceof Error ? error.message : String(error) });
-		throw error;
-	}
-	// Read again: the launch wrote a new deadline.
-	return readMetadata(run.runDir) ?? starting;
+	return starting && claimed ? { claimed, run: starting, suspended } : { claimed: false, run: starting };
+}
+
+/** A claimed run whose launch failed: `error`, and still suspended, so the next resume tries it again. */
+function launchFailed(claim: Extract<Claim, { claimed: true }>, error: unknown): void {
+	updateMetadata(claim.run.runDir, { state: "error", suspended: claim.suspended, error: errorText(error) });
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** tmux calls of the parent that have not ended: `settleTmuxCalls` waits for them. */
+const pendingTmuxCalls = new Set<Promise<void>>();
+
+/** Keep `call` until it ends. An error is logged: a rejection nobody handles would end Pi. */
+function track(call: Promise<void>): void {
+	const settled = call
+		.catch((error: unknown) => console.error(`pi-subagent: a tmux call failed: ${error instanceof Error ? error.stack : String(error)}`))
+		.finally(() => pendingTmuxCalls.delete(settled));
+	pendingTmuxCalls.add(settled);
+}
+
+/** Wait until the tmux calls the parent started have ended and their results are written. */
+export async function settleTmuxCalls(): Promise<void> {
+	while (pendingTmuxCalls.size > 0) await Promise.all(pendingTmuxCalls);
 }
 
 function liveRunCount(runs: RunMetadata[], sessionExists = tmuxSessionExists): number {
@@ -133,7 +167,11 @@ function liveRunCount(runs: RunMetadata[], sessionExists = tmuxSessionExists): n
 
 /**
  * The parent tick: start the queued ones of the session's `runs`, oldest first, while fewer than the limit
- * run. Returns the runs as they are after it, so the tick lists the run directory once.
+ * run. Returns the runs as they are after the claims, so the tick lists the run directory once.
+ *
+ * The claim is synchronous, under the run's lock, so the slot is taken at once; the tmux start runs in a
+ * child process, as on a busy machine it takes a second or more and the tick runs on Pi's UI thread. A
+ * start that fails is reported once when tmux ends; `settleTmuxCalls` waits for it.
  */
 export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata, message: string) => void): RunMetadata[] {
 	// No queued run: no liveness check, so the tick costs only the listing.
@@ -143,24 +181,35 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 		if (free <= 0 || run.state !== "queued") return [run];
 		// Its `spawn` or `resume` has not saved the launch yet: tmux would start nothing. A later tick starts it.
 		if (!existsSync(join(run.runDir, "launch.json"))) return [run];
-		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
+		let claim: Claim;
 		try {
-			const started = startRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
-			// `stop` removed the run since the listing.
-			if (!started) return [];
-			free--;
-			return [started];
+			// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
+			claim = claimRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
 		} catch (error) {
 			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
 			if (error instanceof LockBusyError) return [run];
-			free--;
-			const message = error instanceof Error ? error.message : String(error);
-			// Reported once here; known, so the tick neither keeps it nor reports it again (time limit included).
-			markExitKnown(run.runDir);
-			writeResult(run, "failed to start", message);
-			onError(run, message);
-			return [readMetadata(run.runDir) ?? run];
+			throw error;
 		}
+		// `stop` removed the run since the listing.
+		if (!claim.run) return [];
+		if (!claim.claimed) return [claim.run];
+		free--;
+		const claimed = claim;
+		track(
+			startLaunchAsync(claimed.run).catch((error: unknown) => {
+				// Known first, so neither the tick nor the time limit reports it again.
+				markExitKnown(run.runDir);
+				try {
+					waitingAtMost(TICK_LOCK_WAIT_MS, () => launchFailed(claimed, error));
+				} catch (failure) {
+					// A stalled process holds the lock: the run stays `starting` until its grace time ends; known, it is not reported as exited.
+					if (!(failure instanceof LockBusyError)) throw failure;
+				}
+				writeResult(run, "failed to start", errorText(error));
+				onError(run, errorText(error));
+			}),
+		);
+		return [claimed.run];
 	});
 }
 
@@ -242,7 +291,9 @@ export function stopTimedOutRuns(runs: RunMetadata[]): void {
 		if (!run || !stopped) continue;
 		// Before the kill, so the aborted turn and the ended process are not reported as well.
 		markExitKnown(run.runDir);
-		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
+		// In a child process, as the tick runs on Pi's UI thread. The result is written now: `wait` prints and
+		// clears it at once, and a result written after that would reach the parent a second time.
+		track(new Promise((resolveKill) => execFile("tmux", ["kill-session", "-t", run.tmuxSession], () => resolveKill())));
 		writeResult(run, "timed out", timedOutText(run));
 	}
 }
