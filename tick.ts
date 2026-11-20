@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { hasResults, pendingResults, reportExitedRuns } from "./outbox.ts";
+import { hasResults, isExitKnown, pendingResults, reportExitedRuns } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
@@ -49,7 +49,10 @@ export class SessionTick {
 		const runs = startQueuedRuns(listRuns(sessionId()), onStartError ?? (() => {}));
 		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
 		stopTimedOutRuns(runs);
-		const rows = runs.map((run) => ({ run, state: effectiveRunState(run) })).filter(({ state }) => state !== "exited");
+		// A launch that failed was reported, and no child runs: its row would keep the tick for nothing.
+		const rows = runs
+			.map((run) => ({ run, state: effectiveRunState(run) }))
+			.filter(({ run, state }) => state !== "exited" && !(state === "error" && isExitKnown(run.runDir)));
 		show?.(rows);
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.

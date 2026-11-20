@@ -73,7 +73,7 @@ Spawn prints a random handle and the exact tmux attach command. Past the paralle
 
 ## Get the result
 
-When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, or `timed out`, followed by its answer and `[The whole answer: <path>]`. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, or timed-out child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
+When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, `timed out`, or `failed to start` (with the error), followed by its answer and `[The whole answer: <path>]`. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, timed-out, or not started child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
 
 Without that line (print mode, a plain terminal, `PI_SUBAGENT_NOTIFY=0`), no message arrives: use `wait`.
 
@@ -85,7 +85,7 @@ subagent wait <handle>
 
 Run `subagent list` at any time to rediscover active subagents and their handles, names, and current states if you no longer remember them.
 
-`wait` follows the durable session state and prints the latest final assistant response. The first line is `<handle> finished`, or `<handle> failed (error)` or `failed (aborted)` with exit code 1 when the turn ended in a provider error or an abort, or `<handle> timed out` with exit code 1 when the child passed its `--timeout`. A failed turn is no result: send the task again or report the gap, and never count it as a review that found nothing. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
+`wait` follows the durable session state and prints the latest final assistant response. The first line is `<handle> finished`, or `<handle> failed (error)` or `failed (aborted)` with exit code 1 when the turn ended in a provider error or an abort, `<handle> timed out` with exit code 1 when the child passed its `--timeout`, or `<handle> failed to start` and the error with exit code 1 when a queued child could not start. A failed turn is no result: send the task again or report the gap, and never count it as a review that found nothing. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
 
 ## Review with two or more children
 
