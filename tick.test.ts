@@ -8,7 +8,7 @@ import { afterEach, beforeEach, mock, test } from "node:test";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
 import { queueSuspendedRun } from "./queue.ts";
-import { startQueuedRuns } from "./queue.ts";
+import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
@@ -242,6 +242,18 @@ test("a child that answers and goes idle before its 2 s limit is never stopped: 
 
 	assert.deepEqual(tmuxCalls(), []);
 	assert.deepEqual(sent, ["Subagent aaa111 finished\n\nthe answer"]);
+});
+
+test("a child that goes idle after the tick lists it, and before the time limit check, is not stopped", () => {
+	const { run } = liveRun("aaa111", { deadline: new Date(Date.now() - 1000).toISOString() });
+	const runs = listRuns("parent");
+
+	// The child answers between the listing and the check.
+	updateMetadata(run.runDir, { state: "idle" });
+	stopTimedOutRuns(runs);
+
+	assert.equal(readMetadata(run.runDir)?.timedOut, undefined);
+	assert.deepEqual(tmuxCalls(), []);
 });
 
 test("a child that gets a new message after its deadline is stopped by the limit counted from that turn", () => {
