@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { markExitKnown, markWaiting } from "./outbox.ts";
-import { processStartTime, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { processStartTime, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -104,6 +104,24 @@ test("a session with no children runs no tick: a run written later is not seen i
 	assert.deepEqual(shown, [[]]);
 	assert.deepEqual(sent, []);
 	assert.deepEqual(tmuxCalls(), []);
+});
+
+test("ticks while the child changes its metadata under the lock start no program", () => {
+	const { tick, shown } = parentTick();
+	// No recorded start time: the tick has no reason of its own to run `ps` (#33 removes that one).
+	const { run } = liveRun("aaa111", { childStarted: undefined });
+	// After `liveRun`, which reads the start time: a `ps` that records each call, then answers as the real one.
+	writeFileSync(join(root, "bin", "ps"), `#!/bin/sh\necho "$*" >> "${join(root, "ps-calls")}"\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+	tick.wake();
+
+	for (const state of ["idle", "busy", "idle"] as const) {
+		updateMetadata(run.runDir, { state });
+		mock.timers.tick(1000);
+	}
+
+	assert.deepEqual(shown.at(-1), [{ handle: "aaa111", state: "idle" }]);
+	assert.deepEqual(tmuxCalls(), []);
+	assert.equal(existsSync(join(root, "ps-calls")), false);
 });
 
 test("a child starts the tick: its row shows each second, with no program started", () => {
