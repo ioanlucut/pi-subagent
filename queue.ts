@@ -15,6 +15,8 @@ import {
 	startLaunch,
 	tmuxSessionExists,
 	updateMetadata,
+	withSessionLock,
+	writeMetadata,
 } from "./shared.ts";
 
 /** Children that may run at once in one parent session: `PI_SUBAGENT_LIMIT`, else `subagentLimit` in Pi's settings, else 4. */
@@ -39,6 +41,20 @@ export function mustQueue(sessionId: string | undefined): boolean {
 	if (process.env.PI_SUBAGENT_QUEUE !== "1" || sessionId === undefined) return false;
 	const runs = listRuns(sessionId);
 	return runs.some((run) => run.state === "queued") || liveRunCount(runs) >= runLimit();
+}
+
+/**
+ * Write a new run as `queued` when it must queue, else `starting`, and return whether it queued. The count
+ * and the write hold the session lock: two `spawn` at once must not both see the last free slot. A
+ * `starting` run holds its slot from this write, so its slow tmux start can follow outside the lock.
+ */
+export function writeNewRun(run: RunMetadata): boolean {
+	const write = () => {
+		const queued = mustQueue(run.parentSessionId);
+		writeMetadata({ ...run, state: queued ? "queued" : "starting" });
+		return queued;
+	};
+	return run.parentSessionId === undefined ? write() : withSessionLock(run.parentSessionId, write);
 }
 
 /** The `State:` line that `spawn` and `resume` print. */

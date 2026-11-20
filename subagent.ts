@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting } from "./outbox.ts";
-import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText } from "./queue.ts";
+import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -30,7 +30,6 @@ import {
 	turnOutcome,
 	updateMetadata,
 	waitForRunShutdown,
-	writeMetadata,
 } from "./shared.ts";
 
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -317,7 +316,6 @@ function spawnSubagent(callerArgs: string[]): void {
 	if (noContextFiles) launchArgs.push("--no-context-files");
 
 	const parentSessionId = process.env.PI_SESSION_ID || undefined;
-	const queued = mustQueue(parentSessionId);
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
@@ -337,12 +335,13 @@ function spawnSubagent(callerArgs: string[]): void {
 		thinking,
 		launchArgs,
 		timeout,
-		state: queued ? "queued" : "starting",
+		state: "starting",
 		hasStarted: false,
 		createdAt: now,
 		updatedAt: now,
 	};
-	writeMetadata(metadata);
+	const queued = writeNewRun(metadata);
+	metadata.state = queued ? "queued" : "starting";
 
 	const initialArgs = files.map((file) => `@${file}`);
 	const task = prompts.length > 0 ? `Task:\n${prompts.join("\n\n")}` : undefined;
