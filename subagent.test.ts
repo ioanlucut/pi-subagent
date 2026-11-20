@@ -577,6 +577,24 @@ test("stop right after the child wrote its result prints it, and no message foll
 	assert.equal(pendingResults([run]), undefined);
 });
 
+test("a stop that fails gives the result back, and a later stop prints it", () => {
+	const runDir = transcriptRun("tra666", "/repo/my-app");
+	updateMetadata(runDir, { parentSessionId: "parent" });
+	reportSettledTurn(runDir);
+	const [run] = listRuns("parent");
+	const lock = join(runDir, "metadata.lock");
+	writeFileSync(lock, `${process.pid} held`);
+
+	const failed = runCli(["stop", "tra666"], {});
+
+	assert.equal(failed.status, 1);
+	assert.match(pendingResults([run])?.text ?? "", /^Subagent tra666 finished\n\nDone\./, "the parent can still get the result");
+	rmSync(lock);
+	const retried = runCli(["stop", "tra666"], {});
+	assert.equal(retried.status, 0, retried.stderr);
+	assert.match(retried.stdout, /\n\nSubagent tra666 finished\n\nDone\.\n/);
+});
+
 test("last prints the latest answer and the state, without waiting", () => {
 	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
 	const [run] = listRuns();
@@ -801,6 +819,22 @@ test("spawn --worktree fails for a branch checked out elsewhere, and names that 
 	assert.equal(existsSync(join(home, "WORK", "dev", ".worktrees", "repo", "integ")), false);
 });
 
+test("spawn --worktree for a branch held by a worktree whose directory is gone says to prune it", () => {
+	const { repo, home } = gitRepo();
+	const gone = join(root, "gone");
+	gitIn(repo, "worktree", "add", "-q", "-b", "stale", gone, "main");
+	rmSync(gone, { recursive: true });
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "stale", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /branch stale is held by a worktree whose directory is gone; run `git worktree prune`/);
+	assert.equal(listRuns().length, 0, "no child");
+});
+
 test("PI_SUBAGENT_WORKTREE_ROOT moves the worktree root", async () => {
 	const { repo, home } = gitRepo();
 	const worktree = join(root, "trees", "repo", "t1");
@@ -939,7 +973,7 @@ async function idleFirstChild(answer: string): Promise<RunMetadata> {
 	const first = byName("c0");
 	await startedChild(first);
 	writeFileSync(first.sessionFile, `${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", content: [{ type: "text", text: answer }], stopReason: "stop" } })}\n`);
-	return updateMetadata(first.runDir, { state: "idle" })!;
+	return updateMetadata(first.runDir, { state: "idle", hasStarted: true })!;
 }
 
 test("a spawn that queues behind an idle child names it and says that stop frees its slot", async () => {
@@ -951,6 +985,15 @@ test("a spawn that queues behind an idle child names it and says that stop frees
 		output.split("\n")[1],
 		`State: queued, starts when fewer than 1 children run. 1 idle child holds a slot: c0 (${idle.handle}). Stop the ones you need no more to free a slot.`,
 	);
+});
+
+test("a spawn that queues behind a child that is idle before its first turn does not name it", async () => {
+	const idle = await idleFirstChild("Done.");
+	updateMetadata(idle.runDir, { hasStarted: false });
+
+	const [output] = spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+
+	assert.equal(output.split("\n")[1], "State: queued, starts when fewer than 1 children run");
 });
 
 test("a finished result says that stop frees the child's slot only while another child is queued", async () => {
@@ -1426,7 +1469,7 @@ test("spawn --agent starts the child with the agent file's model, thinking, tool
 	assert.equal(flagValue(args, "--tools"), "read,bash");
 	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
 	assert.ok(args.includes("--no-mcp"));
-	assert.equal(args.at(-1), "Follow the brief.\n\nTask:\nhi");
+	assert.equal(args.at(-1), "Instructions:\nFollow the brief.\n\nTask:\nhi");
 });
 
 test("an agent body that starts with - reaches the child as text after --, not as Pi options", async () => {
@@ -1436,7 +1479,28 @@ test("an agent body that starts with - reaches the child as text after --, not a
 
 	assert.equal(result.status, 0, result.stderr);
 	const args = await childArgs(agentDir());
-	assert.deepEqual(args.slice(args.indexOf("--")), ["--", "- You review code.\n\nTask:\nreview"]);
+	assert.deepEqual(args.slice(args.indexOf("--")), ["--", "Instructions:\n- You review code.\n\nTask:\nreview"]);
+});
+
+test("an agent body that starts with @ reaches the child as text after a fixed first line, not as a file", async () => {
+	const notes = join(root, "notes.md");
+	writeFileSync(notes, "notes");
+	agentFile(join(agentDir(), "agents"), "lint", [], "@x");
+	agentFile(join(agentDir(), "agents"), "reviewer", [], "@reviewer: be short.");
+	const env = spawnEnv(agentDir(), fakePi(join(root, "bin")));
+
+	const lint = runCli(["spawn", "--cwd", root, "--agent", "lint", "--name", "lint", "--file", notes], env);
+	const reviewer = runCli(["spawn", "--cwd", root, "--agent", "reviewer", "--name", "reviewer", "--prompt", "review"], env);
+
+	assert.equal(lint.status, 0, lint.stderr);
+	assert.equal(reviewer.status, 0, reviewer.stderr);
+	const args = async (name: string) => {
+		await startedChild(byName(name));
+		return JSON.parse(readFileSync(join(byName(name).runDir, "argv"), "utf8")) as string[];
+	};
+	const lintArgs = await args("lint");
+	assert.deepEqual(lintArgs.slice(lintArgs.indexOf("--")), ["--", `@${notes}`, "Instructions:\n@x"]);
+	assert.equal((await args("reviewer")).at(-1), "Instructions:\n@reviewer: be short.\n\nTask:\nreview");
 });
 
 test("spawn --file still attaches the file, after --", async () => {

@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, isExitKnown, markExitKnown, markWaiting, takeResults } from "./outbox.ts";
+import { clearResults, isExitKnown, markExitKnown, markWaiting, returnResults, takeResults } from "./outbox.ts";
 import { resumeRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import {
 	assistantText,
@@ -168,6 +168,9 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 	if (spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${topic}`], { cwd: repoDir }).status === 0) {
 		const entries = git(repoDir, ["worktree", "list", "--porcelain"]).split("\n\n");
 		const holder = entries.find((entry) => entry.split("\n").includes(`branch refs/heads/${topic}`));
+		// A `prunable` worktree's directory is gone, so `--cwd` there cannot work.
+		if (holder?.split("\n").some((line) => line.startsWith("prunable")))
+			fail(`branch ${topic} is held by a worktree whose directory is gone; run \`git worktree prune\` and spawn again`);
 		if (holder) fail(`branch ${topic} is checked out in ${holder.split("\n")[0].replace(/^worktree /, "")}; use --cwd there, or free the branch`);
 		if (base !== undefined) process.stderr.write(`Note: branch ${topic} exists; --base ${base} is ignored\n`);
 		git(repoDir, ["worktree", "add", path, topic]);
@@ -354,7 +357,8 @@ function spawnSubagent(callerArgs: string[]): void {
 	};
 	const initialArgs = files.map((file) => `@${file}`);
 	const task = prompts.length > 0 ? `Task:\n${prompts.join("\n\n")}` : undefined;
-	const firstPrompt = [instructions, task].filter(Boolean).join("\n\n");
+	// A fixed first line, as `Task:` for prompts: Pi reads a positional `@…` as a file also after `--`.
+	const firstPrompt = [instructions && `Instructions:\n${instructions}`, task].filter(Boolean).join("\n\n");
 	if (firstPrompt) initialArgs.push(firstPrompt);
 	let queued = false;
 	try {
@@ -500,7 +504,14 @@ async function stopSubagent(args: string[]): Promise<void> {
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
 	// A result the parent has not got yet goes with the run: print it, as `wait` does, so the parent gets it once.
 	const results = takeResults([metadata], { waited: true });
-	const kept = removeRunDir(metadata.runDir);
+	let kept: string | undefined;
+	try {
+		kept = removeRunDir(metadata.runDir);
+	} catch (error) {
+		// The run stays, so its results go back: the tick or a later `stop` delivers them.
+		returnResults(results?.files ?? []);
+		throw error;
+	}
 	const transcript = kept ? `Transcript: ${kept} (\`pi --resume\` in ${metadata.cwd})\n` : "";
 	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n${transcript}${results ? `\n${results.text}\n` : ""}`);
 }

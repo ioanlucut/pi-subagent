@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { HerdrPanes, watchCommand } from "./herdr-panes.ts";
@@ -239,4 +240,27 @@ test("rows given while a sync runs are synced after it, so the last tick's chang
 	await last;
 
 	assert.equal(calls.at(-1), "pane close w1:p2");
+});
+
+test("a Herdr socket that closes before it replies ends the request, so sync and closeAll end and close the panes", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "psa-sock-"));
+	const server = createServer((socket) => socket.once("data", () => socket.end()));
+	await new Promise<void>((resolveListen) => server.listen(join(dir, "herdr.sock"), resolveListen));
+	const saved = process.env.HERDR_SOCKET_PATH;
+	process.env.HERDR_SOCKET_PATH = join(dir, "herdr.sock");
+	try {
+		const { calls, herdr } = fakeHerdr();
+		const panes = new HerdrPanes("w1:p1", herdr);
+		const hung = new Promise((resolveTimer) => setTimeout(resolveTimer, 2000, "hung"));
+
+		// Two child panes, so the sync asks the socket for the layout.
+		assert.equal(await Promise.race([panes.sync(at("busy", run("aaa"), run("bbb"))).then(() => "synced"), hung]), "synced");
+		assert.equal(await Promise.race([panes.closeAll().then(() => "closed"), hung]), "closed");
+		assert.deepEqual(calls.filter((call) => call.startsWith("pane close")), ["pane close w1:p2", "pane close w1:p3"]);
+	} finally {
+		if (saved === undefined) delete process.env.HERDR_SOCKET_PATH;
+		else process.env.HERDR_SOCKET_PATH = saved;
+		await new Promise((resolveClose) => server.close(resolveClose));
+		rmSync(dir, { recursive: true, force: true });
+	}
 });

@@ -21,7 +21,7 @@ Each subagent is a full Pi in its own tmux session, with its own JSONL transcrip
 | **Fast parent** | The parent checks its children with no program start, and only while it has children. A session with no children does no subagent work. On a busy machine this was the difference between a frozen Pi and a responsive one. |
 | **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. |
 | **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. |
-| **Verified** | `npm test` (173 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login), the last two also in CI. See Development. |
+| **Verified** | `npm test` (183 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login), the last two also in CI. See Development. |
 
 This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at). Upstream has issues and pull requests disabled, so the changes live here. Upstream gives each child a tmux session and its transcript, the CLI (`spawn`, `list`, `status`, `wait`, `send` with `--follow-up`, `stop`), attaching to a child's TUI, and suspend and resume with the parent session. This fork adds the rest of the table, including the model tool, result messages, the rows and Herdr panes, the queue, time limits, agent files, light children, worktrees, the fast parent, and the locks. Two upstream bugs are fixed:
 
@@ -87,7 +87,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
 | `subagent last <handle>`                                         | Print the child's state and latest answer. Does not wait.                                                                                                     |
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
-| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts. A result the parent has not got as a message yet is printed after `Stopped`, and is not sent again. |
+| `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts. A result the parent has not got as a message yet is printed after `Stopped`, and is not sent again. A `stop` that fails leaves the result to be sent. |
 | `subagent resume <handle>`                                       | Start a suspended child, such as one suspended more than 24 h ago. It queues past the limit, as `spawn` does. Of two `resume` of one child at once, one starts it; the other prints `<handle> is already resumed`. |
 | `subagent agents`                                                | Name, scope (`project` or `global`), and description of each agent file, see Agent files.                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
@@ -190,7 +190,7 @@ Load the tdd skill. Commit with a conventional message.
 | `extensions`  | `--extensions`. A relative path is relative to the agent file. Global only.   |
 | `mcp`         | `false` is `--no-mcp`.                                                        |
 | `timeout`     | `--timeout`                                                                   |
-| body          | Added to the child's first prompt, before the `--prompt` text.                |
+| body          | First prompt: `Instructions:` and the body, before the `--prompt` text.       |
 
 Flags on `spawn` override the file: `--agent implementer --model x` uses model `x`. `--extensions` or `--no-extensions` replaces the file's extensions.
 
@@ -277,7 +277,7 @@ subagent spawn --name impl-17 --cwd ~/WORK/dev/my-app --worktree 17_login --base
 
 The child works in `~/WORK/dev/.worktrees/my-app/17_login` on branch `17_login`. `subagent stop` keeps the worktree and the branch; merge and remove them with Git.
 
-If the branch exists already, for example an integration branch for a merger, `--worktree <topic>` checks it out in the new worktree and ignores `--base`, with a note on stderr. If another worktree has that branch checked out, `spawn` fails and names that path; give the child `--cwd <path>` instead.
+If the branch exists already, for example an integration branch for a merger, `--worktree <topic>` checks it out in the new worktree and ignores `--base`, with a note on stderr. If another worktree has that branch checked out, `spawn` fails and names that path; give the child `--cwd <path>` instead. If that worktree's directory is gone, `spawn` says to run `git worktree prune`.
 
 `PI_SUBAGENT_PI` names the program a child runs in place of `pi`, for tests. Upstream ran an executable `pi-test.sh` from `--cwd`, so a cloned repository could choose the program; this fork does not.
 

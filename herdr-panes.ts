@@ -36,6 +36,8 @@ export const herdrRequest: HerdrRequest = (method, params) =>
 		};
 		socket.setTimeout(5000, () => end(undefined));
 		socket.on("error", () => end(undefined));
+		// A socket that closes before a whole reply has no answer; no timeout fires after a close.
+		socket.on("close", () => end(undefined));
 		socket.on("data", (data) => {
 			reply += data;
 			if (!reply.includes("\n")) return;

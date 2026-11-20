@@ -105,7 +105,8 @@ export function stateLine(queued: boolean, sessionId: string | undefined): strin
 	// Only a run of a parent session queues.
 	if (!queued || sessionId === undefined) return "State: busy";
 	const line = `State: queued, starts when fewer than ${runLimit()} children run`;
-	const idle = listRuns(sessionId).filter((run) => effectiveRunState(run) === "idle");
+	// A new child reports `idle` once at startup, before its first turn; it has not answered yet.
+	const idle = listRuns(sessionId).filter((run) => effectiveRunState(run) === "idle" && run.hasStarted);
 	if (idle.length === 0) return line;
 	const holders = idle.map(runDisplayName).join(", ");
 	const count = idle.length === 1 ? "1 idle child holds a slot" : `${idle.length} idle children hold slots`;
