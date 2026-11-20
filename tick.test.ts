@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { markExitKnown, markWaiting } from "./outbox.ts";
-import { processStartTime, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { openAliveFifo, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -41,11 +41,14 @@ function tmuxCalls(): string[] {
 	return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n") : [];
 }
 
-/** A run of the parent session whose child is a live process. */
+/** A run of the parent session whose child is a live process that holds the run's FIFO, as a child Pi does. */
 function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMetadata; child: ChildProcess } {
-	const child = spawn("sleep", ["60"], { stdio: "ignore" });
-	children.push(child);
 	const runDir = join(process.env.PI_CODING_AGENT_DIR as string, "subagents", handle);
+	mkdirSync(runDir, { recursive: true });
+	const fifo = openAliveFifo(runDir);
+	const child = spawn("sleep", ["60"], { stdio: ["ignore", "ignore", "ignore", fifo] });
+	closeSync(fifo);
+	children.push(child);
 	const now = new Date().toISOString();
 	const run = {
 		version: 1,
@@ -58,7 +61,6 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 		state: "busy",
 		hasStarted: true,
 		childPid: child.pid,
-		childStarted: processStartTime(child.pid!),
 		createdAt: now,
 		updatedAt: now,
 		...patch,
@@ -69,7 +71,7 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 
 /** A run that waits for a free slot; it has no process yet. */
 function queuedRun(handle: string): RunMetadata {
-	const { run, child } = liveRun(handle, { state: "queued", childPid: undefined, childStarted: undefined });
+	const { run, child } = liveRun(handle, { state: "queued", childPid: undefined });
 	child.kill("SIGKILL");
 	return run;
 }

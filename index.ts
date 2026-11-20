@@ -9,9 +9,10 @@ import {
 	claimRunDir,
 	guarded,
 	effectiveRunState,
+	holdAliveFifo,
 	isLive,
-	processStartTime,
 	listRuns,
+	ownStartTime,
 	pruneStaleRuns,
 	readMetadata,
 	runDisplayName,
@@ -166,7 +167,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
 		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
-		process.env.PI_SUBAGENT_PARENT_STARTED = processStartTime(process.pid) ?? "";
+		process.env.PI_SUBAGENT_PARENT_STARTED = ownStartTime() ?? "";
 
 		pi.on("session_start", async (_event, ctx) => {
 			// Suspend children of parents that died without shutdown, so they relaunch when their session resumes.
@@ -248,11 +249,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		currentContext = ctx;
 		const metadata = readMetadata(runDir);
 		if (!metadata) return;
+		// The parent checks this FIFO each tick to find out, with no program started, whether this child runs.
+		holdAliveFifo(runDir);
 		updateMetadata(runDir, {
 			childSessionId: ctx.sessionManager.getSessionId(),
-			// The parent checks these each tick to find out, with no program started, whether this child runs.
 			childPid: process.pid,
-			childStarted: processStartTime(process.pid),
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: ctx.isIdle() ? "idle" : "busy",
 			suspended: undefined,
