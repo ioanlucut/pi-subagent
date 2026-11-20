@@ -1314,6 +1314,27 @@ test("spawn --agent starts the child with the agent file's model, thinking, tool
 	assert.equal(args.at(-1), "Follow the brief.\n\nTask:\nhi");
 });
 
+test("an agent body that starts with - reaches the child as text after --, not as Pi options", async () => {
+	agentFile(join(agentDir(), "agents"), "reviewer", [], "- You review code.\n");
+
+	const result = runCli(["spawn", "--cwd", root, "--agent", "reviewer", "--prompt", "review"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.deepEqual(args.slice(args.indexOf("--")), ["--", "- You review code.\n\nTask:\nreview"]);
+});
+
+test("spawn --file still attaches the file, after --", async () => {
+	const notes = join(root, "notes.md");
+	writeFileSync(notes, "notes");
+
+	const result = runCli(["spawn", "--cwd", root, "--file", notes, "--prompt", "read it"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.deepEqual(args.slice(args.indexOf("--")), ["--", `@${notes}`, "Task:\nread it"]);
+});
+
 test("a flag on spawn overrides the agent file", async () => {
 	agentFile(join(agentDir(), "agents"), "implementer", ["model: anthropic/claude-x", "thinking: high"]);
 
@@ -1449,6 +1470,23 @@ test("each subagent tool action prints what the matching CLI command prints", as
 	assert.equal(stopped.isError, false, stopped.text);
 	assert.equal(stopped.text, "Stopped abc123");
 	assert.equal(listRuns("parent").length, 0);
+});
+
+test("the subagent tool passes a prompt and a message that start with -- as text", async () => {
+	const bin = fakePi(join(root, "bin"));
+	await withEnv(spawnEnv(agentDir(), bin), async () => {
+		const result = await runSubagentTool({ action: "spawn", prompt: "--force push" }, toolContext());
+		assert.equal(result.isError, false, result.text);
+	});
+	assert.equal((await childArgs(agentDir())).at(-1), "Task:\n--force push");
+	rmSync(join(agentDir(), "subagents"), { recursive: true });
+
+	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
+	const sent = await runSubagentTool({ action: "send", handle, message: "--verbose please" }, toolContext("parent"));
+	assert.equal(sent.isError, false, sent.text);
+	const inbox = join(agentDir(), "subagents", handle, "inbox");
+	const [file] = readdirSync(inbox);
+	assert.equal(JSON.parse(readFileSync(join(inbox, file), "utf8")).message, "--verbose please");
 });
 
 test("a child spawned with the subagent tool is suspended and resumed like a CLI child", async () => {

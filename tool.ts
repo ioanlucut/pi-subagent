@@ -35,13 +35,13 @@ function cliArgs(params: SubagentToolParams): string[] {
 				"spawn",
 				...VALUE_FLAGS.flatMap((param) => (params[param] === undefined ? [] : [flag(param), params[param] as string])),
 				...SWITCHES.flatMap((param) => (params[param] ? [flag(param)] : [])),
-				...(params.prompt === undefined ? [] : ["--prompt", params.prompt]),
+				...(params.prompt === undefined ? [] : [`--prompt=${params.prompt}`]),
 				...(params.files ?? []).flatMap((file) => ["--file", file]),
 			];
 		case "wait":
 			return ["wait", ...handle, ...(params.timeout === undefined ? [] : ["--timeout", params.timeout])];
 		case "send":
-			return ["send", ...handle, ...(params.followUp ? ["--follow-up"] : []), ...(params.message === undefined ? [] : [params.message])];
+			return ["send", ...handle, ...(params.followUp ? ["--follow-up"] : []), ...(params.message === undefined ? [] : ["--", params.message])];
 		default:
 			return [params.action, ...handle];
 	}
