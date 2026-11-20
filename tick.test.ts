@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
-import { inboxDir, openAliveFifo, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { startQueuedRuns } from "./queue.ts";
+import { inboxDir, listRuns, openAliveFifo, readMetadata, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -298,6 +299,24 @@ test("a queued child that fails to start gives the parent one message with the e
 
 	assert.deepEqual(sent, ["Subagent bbb222 failed to start\n\ntest launch failure"]);
 	assert.deepEqual(shown, [[]]);
+});
+
+test("two ticks that both list one queued run start it once, and the run stays live", () => {
+	// Like tmux: a second session with the same name fails.
+	const made = join(root, "made");
+	writeFileSync(join(root, "bin", "tmux"), `#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\n[ "$1" = new-session ] || exit 1\n[ -e "${made}" ] && { echo 'duplicate session' >&2; exit 1; }\ntouch "${made}"\n`);
+	const run = queuedRun("bbb222");
+	// Two parents, or a tick and `subagent resume`, list the run before either starts it.
+	const first = listRuns("parent");
+	const second = listRuns("parent");
+	const errors: string[] = [];
+
+	startQueuedRuns(first, (_run, message) => errors.push(message));
+	startQueuedRuns(second, (_run, message) => errors.push(message));
+
+	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+	assert.deepEqual(errors, []);
+	assert.equal(readMetadata(run.runDir)?.state, "starting");
 });
 
 test("wake while the tick runs starts no second timer", () => {

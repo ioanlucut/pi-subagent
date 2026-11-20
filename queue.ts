@@ -50,10 +50,18 @@ export function stateLine(queued: boolean): string {
  * Start a run whose launch is saved: mark it `starting`, with `patch`, and start its tmux session. A launch
  * that fails leaves the run `error` and throws. Returns the run as it is after the start, or undefined when
  * `stop` removed it.
+ *
+ * Only a run still in the state the caller read is claimed, under its lock: two parents, or a tick and
+ * `subagent resume`, can both read one run as `queued`. The one that loses starts nothing and gets the run
+ * as the winner left it; a second launch would fail on the tmux session and mark the live run `error`.
  */
 export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
-	const starting = updateMetadata(run.runDir, { ...patch, state: "starting" });
-	if (!starting) return undefined;
+	let claimed = false;
+	const starting = updateMetadata(run.runDir, (current) => {
+		claimed = current.state === run.state;
+		return claimed ? { ...patch, state: "starting" } : undefined;
+	});
+	if (!starting || !claimed) return starting;
 	try {
 		startLaunch(starting);
 	} catch (error) {
