@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
-import { inboxDir, openAliveFifo, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { inboxDir, openAliveFifo, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -107,6 +107,23 @@ test("a session with no children runs no tick: a run written later is not seen i
 	assert.deepEqual(shown, [[]]);
 	assert.deepEqual(sent, []);
 	assert.deepEqual(tmuxCalls(), []);
+});
+
+test("ticks while the child changes its metadata under the lock start no program", () => {
+	// A `ps` that records each call, then answers as the real one.
+	writeFileSync(join(root, "bin", "ps"), `#!/bin/sh\necho "$*" >> "${join(root, "ps-calls")}"\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+	const { tick, shown } = parentTick();
+	const { run } = liveRun("aaa111");
+	tick.wake();
+
+	for (const state of ["idle", "busy", "idle"] as const) {
+		updateMetadata(run.runDir, { state });
+		mock.timers.tick(1000);
+	}
+
+	assert.deepEqual(shown.at(-1), [{ handle: "aaa111", state: "idle" }]);
+	assert.deepEqual(tmuxCalls(), []);
+	assert.equal(existsSync(join(root, "ps-calls")), false);
 });
 
 test("a child starts the tick: its row shows each second, with no program started", () => {

@@ -268,6 +268,7 @@ A suspended child shows as `suspended` in `list` and `status`, is hidden from th
 ```text
 parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents/<handle>/
    │                                            metadata.json   state, model, parent
+   │                                            metadata.lock   while a process changes metadata.json
    │                                            session.jsonl   the child's transcript
    │                                            inbox/          messages from `send`
    │                                            outbox/         results for the parent
@@ -286,6 +287,7 @@ parent Pi ── bash tool ── subagent spawn ──► ~/.pi/agent/subagents
 - `widget.ts` reads each child's transcript for the rows: last action, tokens, cost.
 - `outbox.ts` is the way back: the child writes each turn's result to `outbox/`, and the parent extension puts it into the chat and deletes the file.
 - `launcher.ts` runs inside the tmux pane. tmux gives a new pane the tmux server's environment, so the CLI saves the caller's environment in a private `launch.json`. The launcher restores it, deletes the file, and becomes `pi`.
+- `lock.ts` is the lock for `metadata.json`: the parent tick, the CLI, and the child each change it, so each change reads, changes, and writes it under one lock per run, and no change is lost. The lock is a file with the holder's process ID, linked to its name, which fails like `O_EXCL` when it exists; a lock whose process is gone is taken over. It starts no program. The same lock exists for a whole parent session, in `subagents/session-<hash>.lock`.
 - `wait` reads the child's state from `metadata.json` and its answer from `session.jsonl`, never from the terminal screen.
 
 Run directories live under `$PI_CODING_AGENT_DIR/subagents` (default `~/.pi/agent/subagents`), mode `0700`.

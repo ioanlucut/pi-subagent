@@ -57,17 +57,21 @@ beforeEach(() => {
 
 afterEach(() => {
 	spawnSync("tmux", ["kill-server"], { stdio: "ignore" });
-	rmSync(root, { recursive: true, force: true });
+	// A child that tmux has not ended yet can still write a file (a lock) while the remove runs.
+	rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-/** Write an executable `pi` that records what it received and, like a real child, holds its FIFO and records its process ID, then stays alive. */
+/**
+ * Write an executable `pi` that records what it received and, like a real child, holds its FIFO and records
+ * its process ID through `updateMetadata`, then stays alive.
+ */
 function fakePi(dir: string): string {
 	mkdirSync(dir, { recursive: true });
 	const script = join(dir, "pi");
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst metadata = join(process.env.PI_SUBAGENT_RUN_DIR, "metadata.json");\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nfs.writeFileSync(metadata + ".pi", JSON.stringify({ ...JSON.parse(fs.readFileSync(metadata, "utf8")), childPid: process.pid }));\nfs.renameSync(metadata + ".pi", metadata);\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst { updateMetadata } = require(${JSON.stringify(join(import.meta.dirname, "shared.ts"))});\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nupdateMetadata(process.env.PI_SUBAGENT_RUN_DIR, { childPid: process.pid });\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;

@@ -272,9 +272,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		currentContext = ctx;
 		inbox.promptStarted();
 		// A turn from idle that the inbox did not start (typed in the pane): its time limit counts from now.
-		const metadata = readMetadata(runDir);
-		const deadline = metadata?.state === "idle" ? nextDeadline(metadata) : undefined;
-		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined, ...(deadline && { deadline }) });
+		updateMetadata(runDir, (metadata) => {
+			const deadline = metadata.state === "idle" ? nextDeadline(metadata) : undefined;
+			return { state: "busy", hasStarted: true, error: undefined, ...(deadline && { deadline }) };
+		});
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {

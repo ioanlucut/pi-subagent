@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -15,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { withLock } from "./lock.ts";
 
 const launcherPath = join(dirname(fileURLToPath(import.meta.url)), "launcher.ts");
 
@@ -189,27 +191,61 @@ export function readMetadata(runDir: string): RunMetadata | undefined {
 	}
 }
 
+/** Write a whole run, as `spawn` does for a new one; a change to a run goes through `updateMetadata`. */
 export function writeMetadata(metadata: RunMetadata): void {
 	mkdirSync(dirname(metadataPath(metadata.runDir)), { recursive: true, mode: 0o700 });
+	withRunLock(metadata.runDir, () => replaceMetadata(metadata));
+}
+
+function replaceMetadata(metadata: RunMetadata): void {
 	const target = metadataPath(metadata.runDir);
 	const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(metadata, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 	renameSync(temporary, target);
 }
 
-export function updateMetadata(runDir: string, patch: Partial<RunMetadata>): RunMetadata | undefined {
-	const current = readMetadata(runDir);
-	if (!current) return undefined;
-	const next: RunMetadata = {
-		...current,
-		...patch,
-		version: 1,
-		handle: current.handle,
-		runDir: current.runDir,
-		updatedAt: new Date().toISOString(),
-	};
-	writeMetadata(next);
-	return next;
+/**
+ * Run `fn` while this process holds the lock of the run: the parent tick, the CLI, and the child each
+ * change the run's metadata, and a write from an older read drops another's change. Undefined, with
+ * `fn` not run, when the run is gone.
+ */
+export function withRunLock<T>(runDir: string, fn: () => T): T | undefined {
+	return withLock(join(runDir, "metadata.lock"), fn);
+}
+
+/**
+ * Run `fn` while this process holds the lock of the parent session `sessionId`, for a change that reads
+ * several of its runs, such as the count against the limit.
+ */
+export function withSessionLock<T>(sessionId: string, fn: () => T): T {
+	mkdirSync(getRunsDir(), { recursive: true, mode: 0o700 });
+	// A hash: the ID comes from the caller's environment and must not name a path.
+	const name = createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+	return withLock(join(getRunsDir(), `session-${name}.lock`), fn) as T;
+}
+
+/**
+ * Change a run under its lock: read, apply `patch`, write. A function `patch` gets the run as it is under
+ * the lock, for a change that depends on it. Undefined when the run is gone; it is not created again.
+ */
+export function updateMetadata(
+	runDir: string,
+	patch: Partial<RunMetadata> | ((current: RunMetadata) => Partial<RunMetadata>),
+): RunMetadata | undefined {
+	return withRunLock(runDir, () => {
+		const current = readMetadata(runDir);
+		if (!current) return undefined;
+		const next: RunMetadata = {
+			...current,
+			...(typeof patch === "function" ? patch(current) : patch),
+			version: 1,
+			handle: current.handle,
+			runDir: current.runDir,
+			updatedAt: new Date().toISOString(),
+		};
+		replaceMetadata(next);
+		return next;
+	});
 }
 
 export async function waitForRunShutdown(runDir: string, timeoutMs = 2000): Promise<void> {
@@ -251,7 +287,8 @@ export function removeRunDir(runDir: string): string | undefined {
 		copyFileSync(metadata.sessionFile, target);
 		kept = target;
 	}
-	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	// Under the lock, so no update in flight writes the run again.
+	withRunLock(runDir, () => rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 	return kept;
 }
 
@@ -486,8 +523,11 @@ export function assistantText(message: AssistantMessage): string {
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	for (const run of runs) {
 		// A child that has not recorded its process ID never writes `exited`: the parent marks it, so it is not alive in its grace time.
-		const unstarted = readMetadata(run.runDir)?.childPid === null;
-		updateMetadata(run.runDir, { suspended: true, suspendedAt: new Date().toISOString(), ...(unstarted && { state: "exited" as const }) });
+		updateMetadata(run.runDir, (current) => ({
+			suspended: true,
+			suspendedAt: new Date().toISOString(),
+			...(current.childPid === null && { state: "exited" as const }),
+		}));
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
