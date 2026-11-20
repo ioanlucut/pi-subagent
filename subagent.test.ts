@@ -60,14 +60,14 @@ afterEach(() => {
 	rmSync(root, { recursive: true, force: true });
 });
 
-/** Write an executable `pi` that records what it received and, like a real child, its process ID, then stays alive. */
+/** Write an executable `pi` that records what it received and, like a real child, holds its FIFO and records its process ID, then stays alive. */
 function fakePi(dir: string): string {
 	mkdirSync(dir, { recursive: true });
 	const script = join(dir, "pi");
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst metadata = join(process.env.PI_SUBAGENT_RUN_DIR, "metadata.json");\nfs.writeFileSync(metadata + ".pi", JSON.stringify({ ...JSON.parse(fs.readFileSync(metadata, "utf8")), childPid: process.pid }));\nfs.renameSync(metadata + ".pi", metadata);\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst metadata = join(process.env.PI_SUBAGENT_RUN_DIR, "metadata.json");\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nfs.writeFileSync(metadata + ".pi", JSON.stringify({ ...JSON.parse(fs.readFileSync(metadata, "utf8")), childPid: process.pid }));\nfs.renameSync(metadata + ".pi", metadata);\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;
@@ -265,6 +265,17 @@ test("suspendOrphanedRuns suspends only children whose parent process is gone", 
 	assert.equal(readMetadata(live.runDir)?.suspended, undefined);
 });
 
+test("suspendOrphanedRuns still suspends a run of an older version, with no child process ID and no parent start time", async () => {
+	spawnChildren(1, { PI_SUBAGENT_PARENT_PID: String(deadPid()) });
+	const [run] = listRuns();
+	updateMetadata(run.runDir, { childPid: undefined, parentStarted: undefined });
+
+	await suspendOrphanedRuns();
+
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(readMetadata(run.runDir)?.suspended, true);
+});
+
 test("a resumed orphan belongs to the new parent, so the next sweep leaves it running", async () => {
 	spawnChildren(1, { PI_SUBAGENT_PARENT_PID: String(deadPid()), PI_SESSION_ID: "parent-session" });
 	await suspendOrphanedRuns();
@@ -280,7 +291,7 @@ test("a resumed orphan belongs to the new parent, so the next sweep leaves it ru
 test("a resumed child is starting, not exited, before its new process records its ID", async () => {
 	spawnChildren(1, { PI_SESSION_ID: "parent-session" });
 	const [run] = listRuns();
-	updateMetadata(run.runDir, { childPid: deadPid(), childStarted: "Thu Jan  1 00:00:00 1970" });
+	updateMetadata(run.runDir, { childPid: deadPid() });
 	await suspendRuns([run]);
 
 	resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));

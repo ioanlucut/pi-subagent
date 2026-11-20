@@ -7,8 +7,8 @@ import {
 	getAgentDir,
 	isLive,
 	listRuns,
+	ownStartTime,
 	prepareLaunch,
-	processStartTime,
 	readMetadata,
 	removeRunDir,
 	type RunMetadata,
@@ -68,9 +68,6 @@ function liveRunCount(runs: RunMetadata[]): number {
 	return runs.filter((run) => isLive(effectiveRunState(run))).length;
 }
 
-/** This Pi's start time, read once: `ps` costs a program start on the UI thread. */
-let ownStartTime: string | undefined;
-
 /**
  * The parent tick: start the queued ones of the session's `runs`, oldest first, while fewer than the limit
  * run. Returns the runs as they are after it, so the tick lists the run directory once.
@@ -82,9 +79,8 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	return runs.flatMap((run) => {
 		if (free <= 0 || run.state !== "queued") return [run];
 		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
-		ownStartTime ??= processStartTime(process.pid);
 		try {
-			const started = startRun(run, { parentPid: process.pid, parentStarted: ownStartTime });
+			const started = startRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
 			// `stop` removed the run since the listing.
 			if (!started) return [];
 			free--;
@@ -115,7 +111,6 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 			error: undefined,
 			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
 			childPid: null,
-			childStarted: undefined,
 		}) ?? run;
 	// An earlier launch that failed was reported; the results of this one must be.
 	clearExitKnown(run.runDir);

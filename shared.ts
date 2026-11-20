@@ -1,8 +1,11 @@
 import { spawnSync } from "node:child_process";
 import {
+	closeSync,
+	constants,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
 	readdirSync,
 	renameSync,
@@ -34,8 +37,6 @@ export interface RunMetadata {
 	 * with no field at all is from a version before this one, and only tmux knows whether it runs.
 	 */
 	childPid?: number | null;
-	/** Start time of the child pi (`ps -o lstart`), so a reused process ID does not count as the child. */
-	childStarted?: string;
 	tmuxSession: string;
 	runDir: string;
 	sessionFile: string;
@@ -96,7 +97,7 @@ export function parseDuration(value: string): number | undefined {
 }
 
 /** Survives `/reload`, which loads this module again in the same process. */
-const processState = globalThis as { piSubagentRunDir?: string };
+const processState = globalThis as { piSubagentRunDir?: string; piSubagentAliveFd?: number; piSubagentOwnStarted?: string };
 
 /**
  * The run this process is the child of. The child takes PI_SUBAGENT_RUN_DIR out of its environment, so a
@@ -350,32 +351,48 @@ export function inStartingGrace(metadata: RunMetadata): boolean {
 	return metadata.state === "starting" && Date.now() - Date.parse(metadata.updatedAt) < STARTING_GRACE_MS;
 }
 
-/** Verdicts on (process ID, start time) pairs, so `ps` runs once per child and not on each tick. */
-const checkedChildren = new Map<string, boolean>();
+const aliveFifoPath = (runDir: string): string => join(runDir, "alive");
 
 /**
- * Whether the run's child process runs, with no program started in the normal case: the widget and
- * result ticks call this each second on Pi's UI thread, where one `tmux` call can take 2 s on a busy
- * machine. A process ID can be reused, so the start time is checked once with `ps`; an ID once found
- * dead stays dead. A child that has not recorded its ID yet lives while it is in its grace time. Only a
- * run from an older version, with no `childPid` field, asks tmux.
+ * Open the read end of the run's FIFO, created on first use, and return its descriptor. The child holds it
+ * open for its whole life; the kernel closes it when the child ends, also on `kill -9`. Node opens files with
+ * close-on-exec, so programs the child starts do not hold it.
+ */
+export function openAliveFifo(runDir: string): number {
+	const path = aliveFifoPath(runDir);
+	// Node has no mkfifo. The child runs this once at its start, never the parent's tick.
+	if (!existsSync(path)) spawnSync("mkfifo", ["-m", "600", path], { stdio: "ignore" });
+	return openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+}
+
+/** The child calls this before it records its process ID, so the parent never sees an ID with no FIFO holder. */
+export function holdAliveFifo(runDir: string): void {
+	try {
+		processState.piSubagentAliveFd ??= openAliveFifo(runDir);
+	} catch {
+		// No FIFO (no `mkfifo`): the parent asks tmux, as for a child of an older version.
+	}
+}
+
+/**
+ * Whether the run's child process runs, with no program started: the widget and result ticks call this
+ * each second on Pi's UI thread, where one program start can take 2 s on a busy machine. A process ID can
+ * be reused, and on macOS only a program (`ps`) can read another process's start time, so the parent does
+ * not check the ID: it opens the run's FIFO for writing without blocking, which fails with ENXIO when no
+ * process holds the read end. A process that got the child's ID later does not hold it. A child that has
+ * not recorded its ID yet lives while it is in its grace time. Only a run from an older version, with no
+ * `childPid` field or no FIFO, asks tmux.
  */
 function childIsAlive(metadata: RunMetadata): boolean {
-	const pid = metadata.childPid;
-	if (pid === undefined) return tmuxSessionExists(metadata.tmuxSession);
-	if (pid === null) return inStartingGrace(metadata);
-	const key = `${pid} ${metadata.childStarted}`;
-	if (checkedChildren.get(key) === false || !processExists(pid)) {
-		checkedChildren.set(key, false);
-		return false;
+	if (metadata.childPid === undefined) return tmuxSessionExists(metadata.tmuxSession);
+	if (metadata.childPid === null) return inStartingGrace(metadata);
+	try {
+		closeSync(openSync(aliveFifoPath(metadata.runDir), constants.O_WRONLY | constants.O_NONBLOCK));
+		return true;
+	} catch (error) {
+		// ENXIO: no process holds it. ENOENT: a child of an older version, which made no FIFO.
+		return (error as NodeJS.ErrnoException).code === "ENOENT" && tmuxSessionExists(metadata.tmuxSession);
 	}
-	const known = checkedChildren.get(key);
-	if (known !== undefined || metadata.childStarted === undefined) return known ?? true;
-	const started = processStartTime(pid);
-	// Unknown start time: keep the child, as for the parent, and ask again next tick.
-	if (started === undefined) return true;
-	checkedChildren.set(key, started === metadata.childStarted);
-	return started === metadata.childStarted;
 }
 
 /** Whether a run in this state holds a slot: started, and not known to have ended. */
@@ -533,6 +550,11 @@ function processExists(pid: number): boolean {
 		// EPERM: the process exists but belongs to another user.
 		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
+}
+
+/** This Pi's start time, read once: the extension calls this at load, so the tick that starts queued runs starts no `ps`. */
+export function ownStartTime(): string | undefined {
+	return (processState.piSubagentOwnStarted ??= processStartTime(process.pid) ?? "") || undefined;
 }
 
 /** Start time of a process, or undefined when it cannot be read. Together with the PID it names one process. */
