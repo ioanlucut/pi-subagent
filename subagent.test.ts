@@ -1069,6 +1069,32 @@ test("quit with one run whose lock a live foreign process holds suspends the oth
 	}
 });
 
+test("quit with 5 children and a slow tmux returns to the event loop before any tmux call ends, and still stops each child", async () => {
+	spawnChildren(5, { PI_SESSION_ID: "parent" });
+	const runs = listRuns();
+	await Promise.all(runs.map(startedChild));
+	// Each call waits for `release` (at most 3 s), as a program start on a busy machine does, then runs the real tmux.
+	const bin = join(root, "slow-tmux");
+	mkdirSync(bin);
+	const [release, ended] = [join(root, "release"), join(root, "ended")];
+	const tmux = spawnSync("which", ["tmux"], { encoding: "utf8" }).stdout.trim();
+	writeFileSync(join(bin, "tmux"), `#!/bin/sh\nfor i in $(seq 30); do [ -e "${release}" ] && break; sleep 0.1; done\n"${tmux}" "$@"\ns=$?\necho "$1" >> "${ended}"\nexit $s\n`, { mode: 0o755 });
+
+	let quit: Promise<void> | undefined;
+	await withEnv({ PATH: `${bin}:${basePath}` }, async () => {
+		quit = suspendSessionRuns("parent");
+		// A synchronous tmux call would have ended (after its 3 s wait) before the quit returned.
+		assert.equal(existsSync(ended), false, "no tmux call ended before the quit returned");
+		writeFileSync(release, "");
+		await quit;
+	});
+
+	for (const run of runs) {
+		assert.equal(tmuxSessionExists(run.tmuxSession), false);
+		assert.equal(readMetadata(run.runDir)?.suspended, true);
+	}
+});
+
 test("a queued child is suspended when its parent quits: after 25 h it stays suspended, and a recent one starts with its prompt", async () => {
 	spawnMany(4, queueEnv);
 	await suspendSessionRuns("parent");
