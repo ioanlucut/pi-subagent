@@ -749,6 +749,45 @@ test("spawn --worktree reuses a clean worktree of the same branch, and refuses o
 	assert.equal(readFileSync(join(worktree, "wip.txt"), "utf8"), "work\n");
 });
 
+function gitIn(cwd: string, ...args: string[]): void {
+	const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" });
+	assert.equal(result.status, 0, result.stderr);
+}
+
+test("spawn --worktree takes a branch that exists and has no worktree, and ignores --base", async () => {
+	const { repo, home } = gitRepo();
+	const worktree = join(home, "WORK", "dev", ".worktrees", "repo", "integ");
+	gitIn(repo, "branch", "integ", "main");
+	gitIn(repo, "commit", "-q", "--allow-empty", "-m", "on other");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "integ", "--base", "other", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stderr, /branch integ exists; --base other is ignored/);
+	assert.equal(gitOut(worktree, "branch", "--show-current"), "integ");
+	assert.equal(gitOut(worktree, "rev-parse", "HEAD"), gitOut(repo, "rev-parse", "main"), "the branch keeps its commits");
+	assert.equal((await childEnv(agentDir())).get("PWD"), worktree);
+});
+
+test("spawn --worktree fails for a branch checked out elsewhere, and names that path", () => {
+	const { repo, home } = gitRepo();
+	const elsewhere = join(root, "elsewhere");
+	gitIn(repo, "worktree", "add", "-q", "-b", "integ", elsewhere, "main");
+
+	const result = runCli(["spawn", "--cwd", repo, "--worktree", "integ", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		HOME: home,
+	});
+
+	assert.equal(result.status, 1);
+	assert.ok(result.stderr.includes(`branch integ is checked out in ${realpathSync(elsewhere)}`), result.stderr);
+	assert.equal(listRuns().length, 0, "no child");
+	assert.equal(existsSync(join(home, "WORK", "dev", ".worktrees", "repo", "integ")), false);
+});
+
 test("PI_SUBAGENT_WORKTREE_ROOT moves the worktree root", async () => {
 	const { repo, home } = gitRepo();
 	const worktree = join(root, "trees", "repo", "t1");

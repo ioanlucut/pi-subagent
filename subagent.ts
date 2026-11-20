@@ -144,6 +144,8 @@ function git(cwd: string, args: string[]): string {
  * The worktree `<root>/<repo>/<topic>` on branch `<topic>`, made from `base`. The root is
  * `PI_SUBAGENT_WORKTREE_ROOT`, else `~/WORK/dev/.worktrees`, as the spec asks.
  * An existing path is reused only when it is a clean worktree of that branch, so no work is lost.
+ * An existing branch `<topic>` (a merger's integration branch, a re-spawn) gets the worktree as it is,
+ * unless another worktree has it checked out: Git allows a branch in one worktree only.
  */
 function prepareWorktree(repoDir: string, topic: string, base: string | undefined): string {
 	// The topic is one path segment; `git worktree add -b` rejects what is not a valid branch name.
@@ -163,6 +165,14 @@ function prepareWorktree(repoDir: string, topic: string, base: string | undefine
 		return path;
 	}
 	mkdirSync(dirname(path), { recursive: true });
+	if (spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${topic}`], { cwd: repoDir }).status === 0) {
+		const entries = git(repoDir, ["worktree", "list", "--porcelain"]).split("\n\n");
+		const holder = entries.find((entry) => entry.split("\n").includes(`branch refs/heads/${topic}`));
+		if (holder) fail(`branch ${topic} is checked out in ${holder.split("\n")[0].replace(/^worktree /, "")}; use --cwd there, or free the branch`);
+		if (base !== undefined) process.stderr.write(`Note: branch ${topic} exists; --base ${base} is ignored\n`);
+		git(repoDir, ["worktree", "add", path, topic]);
+		return path;
+	}
 	git(repoDir, ["worktree", "add", "--no-track", "-b", topic, path, base ?? "HEAD"]);
 	return path;
 }

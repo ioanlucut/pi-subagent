@@ -136,7 +136,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--provider`, `--model`                | the parent's                                         | Pick another model. Required for independent opinions.                                |
 | `--thinking <level>`                   | the parent's, else `medium`                          | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.                            |
 | `--cwd <dir>`                          | current directory                                    | Where the child works.                                                                |
-| `--worktree <topic>`                   | off                                                  | Create `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` and work there. Set `PI_SUBAGENT_WORKTREE_ROOT` to use another root than `~/WORK/dev/.worktrees`. Reuses a clean worktree of that branch; fails if the path has other work. `stop` keeps it. |
+| `--worktree <topic>`                   | off                                                  | Create `~/WORK/dev/.worktrees/<repo>/<topic>` on a new branch `<topic>` and work there. Set `PI_SUBAGENT_WORKTREE_ROOT` to use another root than `~/WORK/dev/.worktrees`. Reuses a clean worktree of that branch; fails if the path has other work. If branch `<topic>` exists, uses it as it is and ignores `--base`; fails with the path if another worktree has it checked out. `stop` keeps it. |
 | `--base <branch>`                      | the current branch                                   | With `--worktree`: where the new branch starts.                                       |
 | `--tools <names>`                      | Pi's default tools (`read`, `bash`, `edit`, `write`) | Comma-separated allowlist. `read,grep,find,ls` is read-only. `bash` can change files. |
 | `--prompt <text>`                      |                                                      | Repeatable. All prompts go into the first turn. Text that starts with `--`: `--prompt=<text>`. The child reads the first turn as text, never as Pi options. |
@@ -276,6 +276,8 @@ subagent spawn --name impl-17 --cwd ~/WORK/dev/my-app --worktree 17_login --base
 ```
 
 The child works in `~/WORK/dev/.worktrees/my-app/17_login` on branch `17_login`. `subagent stop` keeps the worktree and the branch; merge and remove them with Git.
+
+If the branch exists already, for example an integration branch for a merger, `--worktree <topic>` checks it out in the new worktree and ignores `--base`, with a note on stderr. If another worktree has that branch checked out, `spawn` fails and names that path; give the child `--cwd <path>` instead.
 
 `PI_SUBAGENT_PI` names the program a child runs in place of `pi`, for tests. Upstream ran an executable `pi-test.sh` from `--cwd`, so a cloned repository could choose the program; this fork does not.
 
