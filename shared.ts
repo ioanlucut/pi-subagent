@@ -299,6 +299,11 @@ export function tmuxSessionExists(session: string): boolean {
 	return spawnSync("tmux", ["has-session", "-t", session], { stdio: "ignore" }).status === 0;
 }
 
+/** Run `tmux args` in a child process, so Pi's UI thread goes on; resolves to whether it succeeded. */
+function tmuxAsync(args: string[]): Promise<boolean> {
+	return new Promise((resolveCall) => execFile("tmux", args, (error) => resolveCall(!error)));
+}
+
 /** Variables tmux sets for each pane. They describe the child's terminal, so they win over the caller's. */
 export const TMUX_PANE_VARIABLES = ["TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMUX", "TMUX_PANE"];
 
@@ -537,8 +542,12 @@ export function assistantText(message: AssistantMessage): string {
 	return parts.join("\n").trim() || message.errorMessage || "(no response text)";
 }
 
-/** Stop running children but keep transcript and metadata, so resuming the parent session relaunches them. */
+/**
+ * Stop running children but keep transcript and metadata, so resuming the parent session relaunches them.
+ * The tmux calls run as child processes, all at once: quit runs on Pi's UI thread.
+ */
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
+	const stopped: Promise<unknown>[] = [];
 	for (const run of runs) {
 		// A child that has not recorded its process ID never writes `exited`: the parent marks it, so it is not alive in its grace time.
 		skippingBusyRun(() =>
@@ -549,10 +558,10 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 			})),
 		);
 		// Also when its lock is busy: no child may outlive the quit.
-		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
+		stopped.push(tmuxAsync(["kill-session", "-t", run.tmuxSession]));
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
-	await Promise.all(runs.map((run) => waitForRunShutdown(run.runDir)));
+	await Promise.all([...stopped, ...runs.map((run) => waitForRunShutdown(run.runDir))]);
 }
 
 /**
@@ -560,15 +569,15 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
  * starts them again within 24 h; remove those that already exited on their own.
  */
 export async function suspendSessionRuns(sessionId: string): Promise<void> {
-	const running: RunMetadata[] = [];
-	for (const run of listRuns(sessionId)) {
-		if (run.state === "queued") {
-			// Never started: its saved launch keeps the first prompt for resume.
-			skippingBusyRun(() => updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() }));
-		} else if (tmuxSessionExists(run.tmuxSession)) running.push(run);
-		else if (!run.suspended) skippingBusyRun(() => removeRunDir(run.runDir));
+	const runs = listRuns(sessionId);
+	for (const run of runs.filter((run) => run.state === "queued")) {
+		// Never started: its saved launch keeps the first prompt for resume.
+		skippingBusyRun(() => updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() }));
 	}
-	await suspendRuns(running);
+	const started = runs.filter((run) => run.state !== "queued");
+	const exists = await Promise.all(started.map((run) => tmuxAsync(["has-session", "-t", run.tmuxSession])));
+	for (const run of started.filter((run, i) => !exists[i] && !run.suspended)) skippingBusyRun(() => removeRunDir(run.runDir));
+	await suspendRuns(started.filter((_run, i) => exists[i]));
 }
 
 /**
