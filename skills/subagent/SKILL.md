@@ -31,7 +31,7 @@ When a role fits, use an agent file: run `subagent agents` to list them, then `s
 
 `--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `<repo>/<topic>` under `$PI_SUBAGENT_WORKTREE_ROOT` (default `~/WORK/dev/.worktrees`) on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
-Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, the child is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run.
+Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, a child that is still working is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run. A child that answered and is idle is not stopped; each new message starts the limit again.
 
 ## Tools
 
