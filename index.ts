@@ -283,8 +283,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => {
 		currentContext = ctx;
 		if (!ctx.isIdle()) return;
-		updateMetadata(runDir, { state: "idle" });
+		// The result first: a `stop` that sees `idle` then finds it, and prints it.
 		reportSettledTurn(runDir);
+		updateMetadata(runDir, { state: "idle" });
 	});
 
 	pi.on("session_shutdown", (event) => {
