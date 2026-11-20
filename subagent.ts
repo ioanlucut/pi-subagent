@@ -181,6 +181,11 @@ function applyAgent(args: string[]): { args: string[]; instructions?: string } {
 		const known = listAgents(process.cwd()).map((each) => each.name);
 		fail(`Unknown agent: ${name} (known: ${known.length ? known.join(", ") : "none"}; see \`subagent agents\`)`);
 	}
+	if (agent.ignoredExtensions) {
+		process.stderr.write(
+			`Warning: ignored the extensions of the project agent file ${agent.file}; only a global agent file or --extensions on spawn can load extensions\n`,
+		);
+	}
 	const rest = args.filter((_arg, i) => i !== index && i !== index + 1);
 	const ownExtensions = rest.includes("--no-extensions") || rest.includes("--extensions");
 	const roleArgs = agent.spawnArgs.filter((arg, i, all) => !ownExtensions || (arg !== "--extensions" && all[i - 1] !== "--extensions"));
@@ -526,7 +531,7 @@ function listAgentFiles(args: string[]): void {
 		process.stdout.write("No agents. Add one in .pi/agents/<name>.md or ~/.pi/agent/agents/<name>.md\n");
 		return;
 	}
-	for (const agent of agents) process.stdout.write(`${agent.name}  ${agent.description ?? ""}`.trimEnd() + "\n");
+	for (const agent of agents) process.stdout.write(`${agent.name}  ${agent.scope}  ${agent.description ?? ""}`.trimEnd() + "\n");
 }
 
 function listSubagents(args: string[]): void {

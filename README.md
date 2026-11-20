@@ -70,7 +70,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
 | `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts.                                                                                                          |
 | `subagent resume <handle>`                                       | Start a suspended child, such as one suspended more than 24 h ago. It queues past the limit, as `spawn` does.                                                                    |
-| `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
+| `subagent agents`                                                | Name, scope (`project` or `global`), and description of each agent file, see Agent files.                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
@@ -133,6 +133,8 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 
 An agent file holds a role, so each `spawn` does not repeat its settings. `subagent spawn --agent implementer` reads `implementer.md` from `.pi/agents/` in the current directory, then from `~/.pi/agent/agents/`. A project file overrides a global file with the same name. An unknown name fails and starts nothing.
 
+A project agent file comes from the repository, not from you, so it cannot load code: `spawn` ignores its `extensions` field, keeps the default extensions and the command guard, and prints one warning that names the file. Only a global agent file or `--extensions` on `spawn` loads extensions.
+
 ```markdown
 ---
 name: implementer
@@ -153,7 +155,7 @@ Load the tdd skill. Commit with a conventional message.
 | `model`       | `--provider` and `--model` for `provider/model`, else `--model`.              |
 | `thinking`    | `--thinking`                                                                  |
 | `tools`       | `--tools`                                                                     |
-| `extensions`  | `--extensions`. A relative path is relative to the agent file.                |
+| `extensions`  | `--extensions`. A relative path is relative to the agent file. Global only.   |
 | `mcp`         | `false` is `--no-mcp`.                                                        |
 | `timeout`     | `--timeout`                                                                   |
 | body          | Added to the child's first prompt, before the `--prompt` text.                |
