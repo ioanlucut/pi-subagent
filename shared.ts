@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	closeSync,
@@ -345,38 +345,56 @@ export function nextDeadline(metadata: RunMetadata): string | undefined {
 	return limit === undefined ? undefined : new Date(Date.now() + limit).toISOString();
 }
 
-/** Start the tmux session of a run whose launch `prepareLaunch` saved. */
+/** Start the tmux session of a run whose launch `prepareLaunch` saved. Throws when tmux fails. */
 export function startLaunch(metadata: RunMetadata): void {
-	const launchFile = join(metadata.runDir, "launch.json");
-	const result = spawnSync(
-		"tmux",
-		[
-			"new-session",
-			"-d",
-			"-s",
-			metadata.tmuxSession,
-			"-x",
-			"120",
-			"-y",
-			"40",
-			"-c",
-			metadata.cwd,
-			"--",
-			// Start the launcher with only tmux's pane variables: server values such as NODE_OPTIONS could break node.
-			"/bin/sh",
-			"-c",
-			`exec /usr/bin/env -i ${TMUX_PANE_VARIABLES.map((name) => `${name}="$${name}"`).join(" ")} "$@"`,
-			"launch",
-			process.execPath,
-			launcherPath,
-			launchFile,
-		],
-		{ encoding: "utf8" },
-	);
-	if (result.status !== 0) {
-		rmSync(launchFile, { force: true });
-		throw new Error(result.stderr.trim() || "Failed to create tmux session");
-	}
+	const result = spawnSync("tmux", newSessionArgs(metadata), { encoding: "utf8" });
+	if (result.status !== 0) launchFailed(metadata, result.stderr);
+}
+
+/**
+ * `startLaunch` for the parent tick, which runs on Pi's UI thread: tmux runs as a child process, so a slow
+ * program start does not block the tick. Rejects when tmux fails.
+ */
+export function startLaunchAsync(metadata: RunMetadata): Promise<void> {
+	return new Promise((resolveLaunch, rejectLaunch) => {
+		execFile("tmux", newSessionArgs(metadata), { encoding: "utf8" }, (error, _stdout, stderr) => {
+			try {
+				if (error) launchFailed(metadata, stderr);
+				resolveLaunch();
+			} catch (failure) {
+				rejectLaunch(failure);
+			}
+		});
+	});
+}
+
+function newSessionArgs(metadata: RunMetadata): string[] {
+	return [
+		"new-session",
+		"-d",
+		"-s",
+		metadata.tmuxSession,
+		"-x",
+		"120",
+		"-y",
+		"40",
+		"-c",
+		metadata.cwd,
+		"--",
+		// Start the launcher with only tmux's pane variables: server values such as NODE_OPTIONS could break node.
+		"/bin/sh",
+		"-c",
+		`exec /usr/bin/env -i ${TMUX_PANE_VARIABLES.map((name) => `${name}="$${name}"`).join(" ")} "$@"`,
+		"launch",
+		process.execPath,
+		launcherPath,
+		join(metadata.runDir, "launch.json"),
+	];
+}
+
+function launchFailed(metadata: RunMetadata, stderr: string | undefined): never {
+	rmSync(join(metadata.runDir, "launch.json"), { force: true });
+	throw new Error(stderr?.trim() || "Failed to create tmux session");
 }
 
 /** tmux starts just after the metadata is written; a run this young whose child has not recorded its ID has not died. */
