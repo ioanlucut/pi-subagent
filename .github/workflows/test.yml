@@ -15,3 +15,6 @@ jobs:
           node-version: 24
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: npm test
+      # verify:e2e runs real Pi with a fake model, so it needs no login. It is the only check that loads index.ts.
+      - run: npm install -g @earendil-works/pi-coding-agent@1.5.2
+      - run: npm run verify:e2e

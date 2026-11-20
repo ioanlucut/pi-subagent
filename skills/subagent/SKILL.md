@@ -27,11 +27,11 @@ subagent spawn --name implementation --prompt "Complete task"
 
 By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment. Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
 
-When a role fits, use an agent file: run `subagent agents` to list them, then `subagent spawn --agent <name> --prompt "..."`. The file sets model, thinking, tools, extensions, MCP, time limit, and instructions; a flag you also give overrides it. An unknown name fails and starts nothing.
+When a role fits, use an agent file: run `subagent agents` to list them, then `subagent spawn --agent <name> --prompt "..."`. The file sets model, thinking, tools, extensions, MCP, time limit, and instructions; a flag you also give overrides it. An unknown name fails and starts nothing. A `project` agent file (from `.pi/agents/` in the repository) cannot load extensions or drop the command guard: `spawn` ignores its `extensions` and warns.
 
 `--cwd` defaults to the current directory. For implementation work that edits files, give each child its own worktree: `--worktree <topic> [--base <branch>]` creates `<repo>/<topic>` under `$PI_SUBAGENT_WORKTREE_ROOT` (default `~/WORK/dev/.worktrees`) on a new branch `<topic>` (from the current branch by default) and starts the child there. It fails when that path has other work. `subagent stop` keeps the worktree and branch. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
-Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, the child is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run.
+Give a child that could get stuck a time limit: `--timeout <duration>`, such as `90s`, `10m`, or `1h`. Past it, a child that is still working is stopped and reported as `timed out`, with the path of its transcript, so it cannot block the run. A child that answered and is idle is not stopped; each new message starts the limit again.
 
 ## Tools
 
@@ -73,7 +73,7 @@ Spawn prints a random handle and the exact tmux attach command. Past the paralle
 
 ## Get the result
 
-When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, or `timed out`, followed by its answer and `[The whole answer: <path>]`. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, or timed-out child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
+When `spawn` prints `Result: arrives as a message when the turn ends`, do not run `subagent wait`. Continue with other work or end your turn. Each time a child ends a turn, you get a message that starts with `Subagent <name> (<handle>) finished`, `failed (error)`, `failed (aborted)`, `exited`, `timed out`, or `failed to start` (with the error), followed by its answer and `[The whole answer: <path>]`. An answer longer than 2,000 characters arrives as its start and `[First 2000 of <n> characters. The whole answer: <path>]`: read that file when you need the rest. A failed, exited, timed-out, or not started child gave no result: send the task again or report the gap, and never count it as a review that found nothing. A `send` gets its answer the same way.
 
 Without that line (print mode, a plain terminal, `PI_SUBAGENT_NOTIFY=0`), no message arrives: use `wait`.
 
@@ -85,7 +85,7 @@ subagent wait <handle>
 
 Run `subagent list` at any time to rediscover active subagents and their handles, names, and current states if you no longer remember them.
 
-`wait` follows the durable session state and prints the latest final assistant response. The first line is `<handle> finished`, or `<handle> failed (error)` or `failed (aborted)` with exit code 1 when the turn ended in a provider error or an abort, or `<handle> timed out` with exit code 1 when the child passed its `--timeout`. A failed turn is no result: send the task again or report the gap, and never count it as a review that found nothing. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
+`wait` follows the durable session state and prints the latest final assistant response. The first line is `<handle> finished`, or `<handle> failed (error)` or `failed (aborted)` with exit code 1 when the turn ended in a provider error or an abort, `<handle> timed out` with exit code 1 when the child passed its `--timeout`, or `<handle> failed to start` and the error with exit code 1 when a queued child could not start. A failed turn is no result: send the task again or report the gap, and never count it as a review that found nothing. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
 
 ## Review with two or more children
 

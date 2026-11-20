@@ -62,8 +62,8 @@ afterEach(() => {
 });
 
 /**
- * Write an executable `pi` that records what it received and, like a real child, its process ID through
- * `updateMetadata`, then stays alive.
+ * Write an executable `pi` that records what it received and, like a real child, holds its FIFO and records
+ * its process ID through `updateMetadata`, then stays alive.
  */
 function fakePi(dir: string): string {
 	mkdirSync(dir, { recursive: true });
@@ -71,7 +71,7 @@ function fakePi(dir: string): string {
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nconst { updateMetadata } = require(${JSON.stringify(join(import.meta.dirname, "shared.ts"))});\nupdateMetadata(process.env.PI_SUBAGENT_RUN_DIR, { childPid: process.pid });\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst { updateMetadata } = require(${JSON.stringify(join(import.meta.dirname, "shared.ts"))});\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nupdateMetadata(process.env.PI_SUBAGENT_RUN_DIR, { childPid: process.pid });\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;
@@ -269,6 +269,17 @@ test("suspendOrphanedRuns suspends only children whose parent process is gone", 
 	assert.equal(readMetadata(live.runDir)?.suspended, undefined);
 });
 
+test("suspendOrphanedRuns still suspends a run of an older version, with no child process ID and no parent start time", async () => {
+	spawnChildren(1, { PI_SUBAGENT_PARENT_PID: String(deadPid()) });
+	const [run] = listRuns();
+	updateMetadata(run.runDir, { childPid: undefined, parentStarted: undefined });
+
+	await suspendOrphanedRuns();
+
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(readMetadata(run.runDir)?.suspended, true);
+});
+
 test("a resumed orphan belongs to the new parent, so the next sweep leaves it running", async () => {
 	spawnChildren(1, { PI_SUBAGENT_PARENT_PID: String(deadPid()), PI_SESSION_ID: "parent-session" });
 	await suspendOrphanedRuns();
@@ -284,7 +295,7 @@ test("a resumed orphan belongs to the new parent, so the next sweep leaves it ru
 test("a resumed child is starting, not exited, before its new process records its ID", async () => {
 	spawnChildren(1, { PI_SESSION_ID: "parent-session" });
 	const [run] = listRuns();
-	updateMetadata(run.runDir, { childPid: deadPid(), childStarted: "Thu Jan  1 00:00:00 1970" });
+	updateMetadata(run.runDir, { childPid: deadPid() });
 	await suspendRuns([run]);
 
 	resumeSuspendedRuns("parent-session", (_run, error) => assert.fail(error));
@@ -831,6 +842,25 @@ test("list and status show a queued child as queued", () => {
 	assert.match(runCli(["status", byName("c2").handle], {}).stdout, /^c2 \(\w+\): queued /);
 });
 
+test("a queued child that fails to start is reported to the parent once, and wait prints the failure and exits 1", async () => {
+	spawnMany(3, queueEnv);
+	assert.equal(runCli(["stop", byName("c0").handle], {}).status, 0);
+	const failingTmux = join(root, "failing-tmux");
+	mkdirSync(failingTmux);
+	writeFileSync(join(failingTmux, "tmux"), "#!/bin/sh\necho 'no server' >&2\nexit 1\n", { mode: 0o755 });
+	const errors: string[] = [];
+	await withEnv({ PATH: `${failingTmux}:${basePath}`, PI_SUBAGENT_LIMIT: "2" }, () => void startQueuedRuns(listRuns("parent"), (_run, message) => errors.push(message)));
+	const queued = byName("c2");
+	assert.deepEqual(errors, ["no server"]);
+	assert.match(pendingResults([queued])?.text ?? "", new RegExp(`^Subagent c2 \\(${queued.handle}\\) failed to start\\n\\nno server$`));
+
+	const result = runCli(["wait", queued.handle], {});
+
+	assert.equal(result.status, 1, result.stderr);
+	assert.equal(result.stdout, `${queued.handle} failed to start\n\nno server\n`);
+	assert.equal(pendingResults([queued]), undefined, "wait printed it, so the parent is not told a second time");
+});
+
 test("stop removes a queued child, and it never starts", async () => {
 	spawnMany(3, queueEnv);
 	const queued = byName("c2");
@@ -1108,7 +1138,23 @@ test("a project agent file overrides a global one with the same name", async () 
 	assert.equal(flagValue(await childArgs(agentDir()), "--model"), "project-model");
 });
 
-test("agents lists the name and description of each agent, a project one in place of a global one", () => {
+test("a project agent file cannot load extensions or drop the command guard, and spawn warns once naming it", async () => {
+	installGuard();
+	const project = join(root, "project");
+	agentFile(join(project, ".pi", "agents"), "reviewer", ["extensions: payload.ts, -cc-safety-net", "tools: read"]);
+	const file = join(realpathSync(project), ".pi", "agents", "reviewer.md");
+
+	const result = runCliIn(project, ["spawn", "--agent", "reviewer", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stderr, `Warning: ignored the extensions of the project agent file ${file}; only a global agent file or --extensions on spawn can load extensions\n`);
+	const args = await childArgs(agentDir());
+	assert.equal(args.includes("--no-extensions"), false);
+	assert.deepEqual(extensionFlags(args), []);
+	assert.equal(flagValue(args, "--tools"), "read");
+});
+
+test("agents lists the name, scope, and description of each agent, a project one in place of a global one", () => {
 	const project = join(root, "project");
 	agentFile(join(agentDir(), "agents"), "reviewer", ["description: Reviews a change"]);
 	agentFile(join(agentDir(), "agents"), "implementer", ["description: Global implementer"]);
@@ -1117,7 +1163,7 @@ test("agents lists the name and description of each agent, a project one in plac
 	const result = runCliIn(project, ["agents"], { PI_CODING_AGENT_DIR: agentDir() });
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.equal(result.stdout, "implementer  Implements one ticket\nreviewer  Reviews a change\n");
+	assert.equal(result.stdout, "implementer  project  Implements one ticket\nreviewer  global  Reviews a change\n");
 });
 
 test("spawn --agent with an unknown name fails and starts nothing", () => {

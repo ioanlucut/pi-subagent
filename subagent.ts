@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, markExitKnown, markWaiting } from "./outbox.ts";
+import { clearResults, isExitKnown, markExitKnown, markWaiting } from "./outbox.ts";
 import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText } from "./queue.ts";
 import {
 	assistantText,
@@ -180,6 +180,11 @@ function applyAgent(args: string[]): { args: string[]; instructions?: string } {
 	if (!agent) {
 		const known = listAgents(process.cwd()).map((each) => each.name);
 		fail(`Unknown agent: ${name} (known: ${known.length ? known.join(", ") : "none"}; see \`subagent agents\`)`);
+	}
+	if (agent.ignoredExtensions) {
+		process.stderr.write(
+			`Warning: ignored the extensions of the project agent file ${agent.file}; only a global agent file or --extensions on spawn can load extensions\n`,
+		);
 	}
 	const rest = args.filter((_arg, i) => i !== index && i !== index + 1);
 	const ownExtensions = rest.includes("--no-extensions") || rest.includes("--extensions");
@@ -446,6 +451,13 @@ async function waitSubagent(args: string[]): Promise<void> {
 		}
 		const pending = inboxHasMessages(metadata.runDir);
 		const state = effectiveRunState(metadata);
+		// A queued launch that failed: the tick sent it as a result, which this prints instead.
+		if (state === "error" && isExitKnown(metadata.runDir)) {
+			process.stdout.write(`${handle} failed to start\n\n${metadata.error ?? ""}\n`);
+			process.exitCode = 1;
+			clearResults(metadata.runDir);
+			return;
+		}
 		if (state === "error") fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
 		if (metadata.hasStarted && state === "idle" && !pending) {
@@ -519,7 +531,7 @@ function listAgentFiles(args: string[]): void {
 		process.stdout.write("No agents. Add one in .pi/agents/<name>.md or ~/.pi/agent/agents/<name>.md\n");
 		return;
 	}
-	for (const agent of agents) process.stdout.write(`${agent.name}  ${agent.description ?? ""}`.trimEnd() + "\n");
+	for (const agent of agents) process.stdout.write(`${agent.name}  ${agent.scope}  ${agent.description ?? ""}`.trimEnd() + "\n");
 }
 
 function listSubagents(args: string[]): void {
