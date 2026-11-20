@@ -226,18 +226,21 @@ export function withSessionLock<T>(sessionId: string, fn: () => T): T {
 
 /**
  * Change a run under its lock: read, apply `patch`, write. A function `patch` gets the run as it is under
- * the lock, for a change that depends on it. Undefined when the run is gone; it is not created again.
+ * the lock, for a change that depends on it; when it returns undefined, the run stays as it is. Undefined
+ * when the run is gone; it is not created again.
  */
 export function updateMetadata(
 	runDir: string,
-	patch: Partial<RunMetadata> | ((current: RunMetadata) => Partial<RunMetadata>),
+	patch: Partial<RunMetadata> | ((current: RunMetadata) => Partial<RunMetadata> | undefined),
 ): RunMetadata | undefined {
 	return withRunLock(runDir, () => {
 		const current = readMetadata(runDir);
 		if (!current) return undefined;
+		const change = typeof patch === "function" ? patch(current) : patch;
+		if (!change) return current;
 		const next: RunMetadata = {
 			...current,
-			...(typeof patch === "function" ? patch(current) : patch),
+			...change,
 			version: 1,
 			handle: current.handle,
 			runDir: current.runDir,

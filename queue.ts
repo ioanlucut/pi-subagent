@@ -69,14 +69,21 @@ export function stateLine(queued: boolean): string {
  *
  * A resumed run is no longer `suspended` from here: the time limit skips suspended runs, so a child that is
  * slow to start, or never starts, would otherwise pass its deadline unseen.
+ *
+ * Only a run still in the state the caller read is claimed, under its lock: two parents, or a tick and
+ * `subagent resume`, can both read one run as `queued`. The one that loses starts nothing and gets the run
+ * as the winner left it; a second launch would fail on the tmux session and mark the live run `error`.
  */
 export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
+	let claimed = false;
 	let suspended: boolean | undefined;
 	const starting = updateMetadata(run.runDir, (current) => {
+		claimed = current.state === run.state;
+		if (!claimed) return undefined;
 		suspended = current.suspended;
 		return { ...patch, state: "starting", suspended: undefined };
 	});
-	if (!starting) return undefined;
+	if (!starting || !claimed) return starting;
 	try {
 		startLaunch(starting);
 	} catch (error) {
