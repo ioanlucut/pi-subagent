@@ -216,24 +216,38 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
  * The parent tick and `wait` call this: a child still working (`starting` or `busy`) past its deadline is
  * stopped and reported once as `timed out`. An idle child has answered, so it stays; a prompt that starts
  * its next turn sets a new deadline. The run directory stays, so its transcript can show where the child was stuck.
+ *
+ * `runs` can be older than the run: a child can go idle after the listing. So the listing only picks the
+ * candidates; the decision is made again on the run as it is under its lock.
  */
 export function stopTimedOutRuns(runs: RunMetadata[]): void {
-	for (const run of runs) {
-		if (run.state !== "starting" && run.state !== "busy") continue;
-		if (!run.deadline || run.timedOut || run.suspended || Date.now() < Date.parse(run.deadline)) continue;
-		if (isExitKnown(run.runDir) || effectiveRunState(run) === "exited") continue;
+	for (const listed of runs) {
+		if (!isPastLimit(listed)) continue;
+		if (isExitKnown(listed.runDir) || effectiveRunState(listed) === "exited") continue;
+		let stopped = false;
+		let run: RunMetadata | undefined;
 		try {
-			updateMetadata(run.runDir, { timedOut: true });
+			run = updateMetadata(listed.runDir, (current) => {
+				stopped = isPastLimit(current);
+				return stopped ? { timedOut: true } : undefined;
+			});
 		} catch (error) {
 			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
 			if (error instanceof LockBusyError) continue;
 			throw error;
 		}
+		if (!run || !stopped) continue;
 		// Before the kill, so the aborted turn and the ended process are not reported as well.
 		markExitKnown(run.runDir);
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 		writeResult(run, "timed out", timedOutText(run));
 	}
+}
+
+/** Still working (`starting` or `busy`) past its deadline, and not yet stopped or suspended. */
+function isPastLimit(run: RunMetadata): boolean {
+	if (run.state !== "starting" && run.state !== "busy") return false;
+	return !!run.deadline && !run.timedOut && !run.suspended && Date.now() >= Date.parse(run.deadline);
 }
 
 export function timedOutText(run: RunMetadata): string {
