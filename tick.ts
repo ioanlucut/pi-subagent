@@ -1,5 +1,5 @@
 import { rmSync } from "node:fs";
-import { waitingAtMost } from "./lock.ts";
+import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { hasResults, isExitKnown, pendingResults, reportExitedRuns } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
@@ -13,9 +13,6 @@ export interface SessionTickOptions {
 	/** A queued child that could not start. */
 	onStartError?: (run: RunMetadata, message: string) => void;
 }
-
-/** All lock waits of one tick together; a real hold takes a few ms. */
-const TICK_LOCK_WAIT_MS = 200;
 
 /**
  * The parent's one-second work, run only while the session has children, queued ones included: a Pi
