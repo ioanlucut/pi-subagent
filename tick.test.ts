@@ -110,11 +110,10 @@ test("a session with no children runs no tick: a run written later is not seen i
 });
 
 test("ticks while the child changes its metadata under the lock start no program", () => {
-	const { tick, shown } = parentTick();
-	// No recorded start time: the tick has no reason of its own to run `ps` (#33 removes that one).
-	const { run } = liveRun("aaa111", { childStarted: undefined });
-	// After `liveRun`, which reads the start time: a `ps` that records each call, then answers as the real one.
+	// A `ps` that records each call, then answers as the real one.
 	writeFileSync(join(root, "bin", "ps"), `#!/bin/sh\necho "$*" >> "${join(root, "ps-calls")}"\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+	const { tick, shown } = parentTick();
+	const { run } = liveRun("aaa111");
 	tick.wake();
 
 	for (const state of ["idle", "busy", "idle"] as const) {
