@@ -72,10 +72,11 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 	return { run, child };
 }
 
-/** A run that waits for a free slot; it has no process yet. */
+/** A run that waits for a free slot, with its launch saved as `spawn` does; it has no process yet. */
 function queuedRun(handle: string): RunMetadata {
 	const { run, child } = liveRun(handle, { state: "queued", childPid: undefined });
 	child.kill("SIGKILL");
+	prepareLaunch(run);
 	return run;
 }
 
