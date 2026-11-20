@@ -1019,6 +1019,52 @@ test("subagent resume queues a suspended child, and it starts when a slot is fre
 	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
 });
 
+/**
+ * Run `subagent <args>` in `count` processes at once. Each waits before its first lock until all have come
+ * there, so each has read the run and checked it, as two commands that run at the same moment would.
+ */
+async function cliAtOnce(argsList: string[][], env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }[]> {
+	const barrier = join(root, "barrier");
+	mkdirSync(barrier);
+	const hook = join(root, "barrier.mjs");
+	writeFileSync(
+		hook,
+		`import fs from "node:fs";\nimport { syncBuiltinESMExports } from "node:module";\nconst write = fs.writeFileSync;\nlet first = true;\nfs.writeFileSync = (path, ...args) => {\n\tif (first && String(path).includes(".lock.")) {\n\t\tfirst = false;\n\t\twrite(${JSON.stringify(barrier)} + "/" + process.pid, "");\n\t\tconst end = Date.now() + 10000;\n\t\twhile (fs.readdirSync(${JSON.stringify(barrier)}).length < ${argsList.length}) {\n\t\t\tif (Date.now() > end) throw new Error("barrier timeout");\n\t\t\tAtomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);\n\t\t}\n\t}\n\treturn write(path, ...args);\n};\nsyncBuiltinESMExports();\n`,
+	);
+	return Promise.all(
+		argsList.map((args) => {
+			const child = spawn(process.execPath, ["--import", hook, cli, ...args], { env: { ...process.env, ...env } });
+			let out = "";
+			child.stdout.on("data", (data) => (out += data));
+			child.stderr.on("data", (data) => (out += data));
+			return new Promise<{ code: number | null; out: string }>((done) => child.on("close", (code) => done({ code, out })));
+		}),
+	);
+}
+
+test("with a limit of 1, two subagent resume of different children at the same time start 1 and queue 1", async () => {
+	spawnMany(2, { PI_SESSION_ID: "parent" });
+	await suspendRuns(listRuns());
+
+	const results = await cliAtOnce([["resume", byName("c0").handle], ["resume", byName("c1").handle]], { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+
+	assert.deepEqual(results.map((result) => result.code), [0, 0], results.map((result) => result.out).join());
+	assert.deepEqual(listRuns().map((run) => run.state).sort(), ["queued", "starting"]);
+	assert.deepEqual(results.map((result) => result.out.split("\n")[1]).sort(), ["State: busy", "State: queued, starts when fewer than 1 children run"]);
+});
+
+test("two subagent resume of one child at the same time start it once; the other says it is already resumed", async () => {
+	const handle = await oldSuspendedChild();
+
+	const results = await cliAtOnce([["resume", handle], ["resume", handle]], { PATH: `${join(root, "bin")}:${basePath}` });
+
+	assert.deepEqual(results.map((result) => result.code).sort(), [0, 1], results.map((result) => result.out).join());
+	assert.match(results.find((result) => result.code === 1)!.out, new RegExp(`^${handle} is already resumed\n$`));
+	await startedChild(byName("old"));
+	assert.equal(effectiveRunState(byName("old")), "starting", "the live run is not marked error");
+	assert.equal(tmuxSessionExists(byName("old").tmuxSession), true);
+});
+
 test("the subagent tool resumes a suspended child, as the CLI does", async () => {
 	assert.ok((TOOL_ACTIONS as readonly string[]).includes("resume"), "the model can choose the action");
 	const handle = await oldSuspendedChild();
