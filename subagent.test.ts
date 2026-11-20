@@ -825,6 +825,31 @@ test("with a limit of 2, 5 spawns at the same time start 2 and queue 3", async (
 	assert.deepEqual([states.filter((state) => state === "starting").length, states.filter((state) => state === "queued").length], [2, 3]);
 });
 
+test("the session lock starts no program: spawn asks tmux about an older run before it takes the lock", () => {
+	// An older version's run, with no process ID: only tmux can tell whether it lives.
+	const old = storedRun("old111", 0);
+	updateMetadata(old, { state: "busy", parentSessionId: "parent" });
+	// A `tmux` and a `ps` that record each call, and whether the session lock was held then.
+	const bin = fakePi(join(root, "bin"));
+	const calls = join(root, "calls");
+	const locked = `ls "${join(agentDir(), "subagents")}"/session-*.lock >/dev/null 2>&1 && echo "$0 in lock" >> "${calls}"`;
+	for (const [name, real] of [["tmux", spawnSync("which", ["tmux"], { encoding: "utf8" }).stdout.trim()], ["ps", "/bin/ps"]]) {
+		writeFileSync(join(bin, name), `#!/bin/sh
+echo "$0 $1" >> "${calls}"
+${locked}
+exec "${real}" "$@"
+`, { mode: 0o755 });
+	}
+
+	const result = runCli(["spawn", "--name", "new", "--cwd", root, "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), ...queueEnv });
+
+	assert.equal(result.status, 0, result.stderr);
+	const lines = readFileSync(calls, "utf8").trim().split("\n");
+	assert.ok(lines.some((line) => line.endsWith("tmux has-session")), "tmux was asked about the older run");
+	assert.deepEqual(lines.filter((line) => line.endsWith("in lock")), []);
+	assert.equal(byName("new").state, "starting");
+});
+
 test("subagentLimit in Pi's settings limits a session to 2 children, and PI_SUBAGENT_LIMIT overrides it", () => {
 	mkdirSync(agentDir(), { recursive: true });
 	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ subagentLimit: 2 }));
