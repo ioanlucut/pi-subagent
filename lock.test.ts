@@ -65,6 +65,17 @@ test("a release does not remove a lock that another holder now owns", () => {
 	assert.equal(readFileSync(lock, "utf8"), other);
 });
 
+test("a lock taken again inside itself throws at once and does not wait for itself", () => {
+	let ran = false;
+
+	const started = Date.now();
+	assert.throws(() => withLock(lock, () => withLock(lock, () => (ran = true))), /taken again inside itself/);
+
+	assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+	assert.equal(ran, false);
+	assert.equal(existsSync(lock), false, "the outer take removed its lock");
+});
+
 test("waitingAtMost limits the wait for a held lock", () => {
 	writeFileSync(lock, `${process.ppid} other`);
 

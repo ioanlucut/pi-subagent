@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { readMetadata, updateMetadata, writeMetadata, type RunMetadata } from "./shared.ts";
+import { readMetadata, removeRunDir, updateMetadata, writeMetadata, type RunMetadata } from "./shared.ts";
 
 const shared = join(import.meta.dirname, "shared.ts");
 let root: string;
@@ -81,6 +81,26 @@ test("a run lock left by a process that died while it held it is taken over", ()
 	const started = Date.now();
 	assert.equal(updateMetadata(runDir, { state: "idle" })?.state, "idle");
 	assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`);
+});
+
+test("removing a run waits for an update in flight, which then ends without error", async () => {
+	// An update that takes 1 s between its read and its write, as a slow one does.
+	const ready = join(root, "ready");
+	const writer = node(`
+		const { writeFileSync } = await import("node:fs");
+		shared.updateMetadata(runDir, () => {
+			writeFileSync(${JSON.stringify(ready)}, "");
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+			return { state: "idle" };
+		});
+	`);
+	const exit = once(writer, "exit");
+	while (!existsSync(ready)) await new Promise((resolve) => setTimeout(resolve, 10));
+
+	removeRunDir(runDir);
+
+	assert.deepEqual(await exit, [0, null], "the update in flight ended without error");
+	assert.equal(existsSync(runDir), false);
 });
 
 test("a removed run is not created again by an update", () => {
