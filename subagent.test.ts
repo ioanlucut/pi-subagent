@@ -27,6 +27,7 @@ import {
 	pruneStaleRuns,
 	readMetadata,
 	removeRunDir,
+	type RunMetadata,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
 	suspendRuns,
@@ -878,6 +879,42 @@ test("when a child ends, the next tick starts the queued child with the caller's
 	assert.equal(tmuxSessionExists(queued.tmuxSession), true);
 	assert.match(await startedChild(queued), /^AWS_PROFILE=caller$/m);
 	assert.equal(JSON.parse(readFileSync(join(queued.runDir, "argv"), "utf8")).at(-1), "Task:\ntask 2");
+});
+
+/** With a limit of 1: spawn `c0`, wait until it runs, and make it idle with `answer` as its last turn. */
+async function idleFirstChild(answer: string): Promise<RunMetadata> {
+	spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+	const first = byName("c0");
+	await startedChild(first);
+	writeFileSync(first.sessionFile, `${JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "assistant", content: [{ type: "text", text: answer }], stopReason: "stop" } })}\n`);
+	return updateMetadata(first.runDir, { state: "idle" })!;
+}
+
+test("a spawn that queues behind an idle child names it and says that stop frees its slot", async () => {
+	const idle = await idleFirstChild("Done.");
+
+	const [output] = spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+
+	assert.equal(
+		output.split("\n")[1],
+		`State: queued, starts when fewer than 1 children run. 1 idle child holds a slot: c0 (${idle.handle}). Stop the ones you need no more to free a slot.`,
+	);
+});
+
+test("a finished result says that stop frees the child's slot only while another child is queued", async () => {
+	const idle = await idleFirstChild("Done.");
+	const deliver = () => {
+		const pending = pendingResults([idle]);
+		for (const file of pending?.files ?? []) rmSync(file);
+		return pending?.text ?? "";
+	};
+
+	reportSettledTurn(idle.runDir);
+	assert.doesNotMatch(deliver(), /holds a slot/, "nothing waits for a slot");
+
+	spawnMany(1, { ...queueEnv, PI_SUBAGENT_LIMIT: "1" });
+	reportSettledTurn(idle.runDir);
+	assert.match(deliver(), new RegExp(`\\]\\n\\nstop ${idle.handle} when you need no follow-up; it holds a slot until then\\.$`));
 });
 
 test("list and status show a queued child as queued", () => {

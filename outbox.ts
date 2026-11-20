@@ -6,6 +6,7 @@ import {
 	inboxHasMessages,
 	inStartingGrace,
 	keptTranscriptPath,
+	listRuns,
 	readLatestAssistant,
 	readMetadata,
 	runDisplayName,
@@ -78,7 +79,21 @@ export function reportSettledTurn(runDir: string): void {
 	if (run.suspended || existsSync(exitKnownPath(runDir))) return;
 	const message = readLatestAssistant(run.sessionFile);
 	if (!message) return;
-	writeResult(run, turnOutcome(message), summarize(run, assistantText(message)));
+	const outcome = turnOutcome(message);
+	const text = summarize(run, assistantText(message));
+	writeResult(run, outcome, outcome === "finished" && hasQueuedRun(run.parentSessionId) ? `${text}\n\n${stopHint(run)}` : text);
+}
+
+/**
+ * An idle child holds its slot until it is stopped: while another child waits for a slot, the parent must
+ * hear it with the result, or it waits for the queued child for ever.
+ */
+function stopHint(run: RunMetadata): string {
+	return `stop ${run.handle} when you need no follow-up; it holds a slot until then.`;
+}
+
+function hasQueuedRun(sessionId: string): boolean {
+	return listRuns(sessionId).some((other) => other.state === "queued");
 }
 
 /** Whether `stop` or the parent ended the child, so its end is no news to the parent. */
