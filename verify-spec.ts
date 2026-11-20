@@ -162,7 +162,8 @@ const suites: [string, string[], string[]][] = [
 		"spawn --agent starts the child with the agent file's model, thinking, tools, extensions, and instructions",
 		"a flag on spawn overrides the agent file",
 		"a project agent file overrides a global one with the same name",
-		"agents lists the name and description of each agent, a project one in place of a global one",
+		"agents lists the name, scope, and description of each agent, a project one in place of a global one",
+		"a project agent file cannot load extensions or drop the command guard, and spawn warns once naming it",
 		"spawn --agent with an unknown name fails and starts nothing",
 	]],
 	["#24", ["subagent.test.ts"], [
