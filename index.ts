@@ -205,6 +205,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 
 		// `subagent spawn` runs from a tool: the first child of the session starts the tick.
+		pi.on("tool_execution_end", () => tick?.wake());
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			tick?.stop();
