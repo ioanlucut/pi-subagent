@@ -299,12 +299,18 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 	);
 }
 
+/** When the time limit of a run that starts work now ends; undefined for a run with no limit. */
+export function nextDeadline(metadata: RunMetadata): string | undefined {
+	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
+	return limit === undefined ? undefined : new Date(Date.now() + limit).toISOString();
+}
+
 /** Start the tmux session of a run whose launch `prepareLaunch` saved. */
 export function startLaunch(metadata: RunMetadata): void {
 	// The limit counts from each launch, so a resumed or queued child is not stopped for the time it did not run.
 	// Written before tmux starts the child, which writes this file too.
-	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
-	if (limit !== undefined) updateMetadata(metadata.runDir, { deadline: new Date(Date.now() + limit).toISOString() });
+	const deadline = nextDeadline(metadata);
+	if (deadline) updateMetadata(metadata.runDir, { deadline });
 	const launchFile = join(metadata.runDir, "launch.json");
 	const result = spawnSync(
 		"tmux",

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
+import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
 	effectiveRunState,
 	getAgentDir,
@@ -87,7 +87,11 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 			return [started];
 		} catch (error) {
 			free--;
-			onError(run, error instanceof Error ? error.message : String(error));
+			const message = error instanceof Error ? error.message : String(error);
+			// Reported once here; known, so the tick neither keeps it nor reports it again (time limit included).
+			markExitKnown(run.runDir);
+			writeResult(run, "failed to start", message);
+			onError(run, message);
 			return [readMetadata(run.runDir) ?? run];
 		}
 	});
@@ -108,6 +112,8 @@ export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> 
 			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
 			childPid: null,
 		}) ?? run;
+	// An earlier launch that failed was reported; the results of this one must be.
+	clearExitKnown(run.runDir);
 	// A child that never started still has the launch `spawn` saved, with its first prompt.
 	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(queued);
 	return queued;
@@ -133,11 +139,13 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 }
 
 /**
- * The parent tick and `wait` call this: a child still running past its deadline is stopped and reported
- * once as `timed out`. The run directory stays, so its transcript can show where the child was stuck.
+ * The parent tick and `wait` call this: a child still working (`starting` or `busy`) past its deadline is
+ * stopped and reported once as `timed out`. An idle child has answered, so it stays; a prompt that starts
+ * its next turn sets a new deadline. The run directory stays, so its transcript can show where the child was stuck.
  */
 export function stopTimedOutRuns(runs: RunMetadata[]): void {
 	for (const run of runs) {
+		if (run.state !== "starting" && run.state !== "busy") continue;
 		if (!run.deadline || run.timedOut || run.suspended || Date.now() < Date.parse(run.deadline)) continue;
 		if (isExitKnown(run.runDir) || effectiveRunState(run) === "exited") continue;
 		// First, so the aborted turn and the ended process are not reported as well.

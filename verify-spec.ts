@@ -157,6 +157,8 @@ const suites: [string, string[], string[]][] = [
 		"a child past its time limit is stopped by the parent tick and reported once as timed out",
 		"a child past its time limit is stopped by the tick and reported as timed out",
 		"wait on a busy child with --timeout 2s reports it timed out after about 2 s, and keeps its transcript",
+		"a child that answers and goes idle before its 2 s limit is never stopped: one finished message, no timed out",
+		"a child that gets a new message after its deadline is stopped by the limit counted from that turn",
 	]],
 	["#22", ["subagent.test.ts"], [
 		"resuming a session with 6 suspended children and a limit of 2 starts 2 and queues 4",
@@ -167,7 +169,8 @@ const suites: [string, string[], string[]][] = [
 		"spawn --agent starts the child with the agent file's model, thinking, tools, extensions, and instructions",
 		"a flag on spawn overrides the agent file",
 		"a project agent file overrides a global one with the same name",
-		"agents lists the name and description of each agent, a project one in place of a global one",
+		"agents lists the name, scope, and description of each agent, a project one in place of a global one",
+		"a project agent file cannot load extensions or drop the command guard, and spawn warns once naming it",
 		"spawn --agent with an unknown name fails and starts nothing",
 	]],
 	["#24", ["subagent.test.ts"], [

@@ -95,6 +95,11 @@ export function markExitKnown(runDir: string): void {
 	}
 }
 
+/** A suspended run queued again: its new launch is news to the parent. */
+export function clearExitKnown(runDir: string): void {
+	rmSync(exitKnownPath(runDir), { force: true });
+}
+
 /**
  * The parent calls this for its runs: a child whose process ended by itself is reported, once. Returns
  * whether a run with no process yet is still in its grace time, so a later call can report it.

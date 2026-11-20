@@ -62,7 +62,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent spawn [options] (--prompt <text> \| --file <path>)...` | Start a child, or queue it past the limit (see below). Prints its handle and the tmux attach command.                                                                          |
 | `subagent list`                                                  | Handles, names, states, and models of this session's children (outside Pi: all).                                                                                                |
 | `subagent status <handle>`                                       | One child's state and model.                                                                                                                                                    |
-| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. A child past its `spawn --timeout` is stopped and prints `<handle> timed out`, exit 1. |
+| `subagent wait <handle> [--timeout <seconds>]`                   | Block until the child is idle, then print its last answer. Default timeout 1800 s. A turn that ended in a provider error or abort prints `<handle> failed (error)` and exits 1. A child past its `spawn --timeout` is stopped and prints `<handle> timed out`, exit 1. A queued child whose launch failed prints `<handle> failed to start` and the error, exit 1. |
 | `subagent send <handle> <message>`                               | Idle child: start a new turn. Busy child: steer the current turn.                                                                                                               |
 | `subagent send <handle> --follow-up <message>`                   | Busy child: queue a turn after the current one.                                                                                                                                 |
 | `subagent rename <handle> <name>`                                | Change the name shown in the parent UI.                                                                                                                                         |
@@ -70,7 +70,7 @@ Let the model run `spawn`. Only Pi's bash tool and the `subagent` tool set the p
 | `subagent interrupt <handle>`                                    | End a busy child's turn, like Escape in its TUI. The turn ends as `failed (aborted)`; the child stays, ready for `send`.                                      |
 | `subagent stop <handle>`                                         | Remove the child. Its transcript stays, see Lifecycle. A queued child is removed before it starts.                                                                                                          |
 | `subagent resume <handle>`                                       | Start a suspended child, such as one suspended more than 24 h ago. It queues past the limit, as `spawn` does.                                                                    |
-| `subagent agents`                                                | Name and description of each agent file, see Agent files.                                                                                                       |
+| `subagent agents`                                                | Name, scope (`project` or `global`), and description of each agent file, see Agent files.                                                                       |
 | `/subagent` (in Pi)                                              | Pick a child and attach to its TUI. Detach to return; inside tmux, `tmux switch-client -l`.                                                                                     |
 
 Below the Pi editor, each child has one row: its state, name, time in the current turn, last tool call or answer, and its output tokens and cost so far. Children after the fifth are counted.
@@ -94,7 +94,7 @@ Subagent review-spec (a1b2c3) finished
 <the child's answer>
 ```
 
-The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), or `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path). Each answer ends with the path of a file that holds it whole, beside the place `stop` keeps the transcript (`<time>_<id>.answers/` in Pi's sessions), so the path stays valid after `stop`. An answer longer than 2,000 characters arrives as its first 2,000 characters and that path; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
+The first line ends with `finished`, `failed (error)`, `failed (aborted)`, `exited` (the process ended and nobody stopped it), `timed out` (it passed its `--timeout` and was stopped; the message gives the transcript path), or `failed to start` (a queued child whose launch failed; the message gives the error). Each answer ends with the path of a file that holds it whole, beside the place `stop` keeps the transcript (`<time>_<id>.answers/` in Pi's sessions), so the path stays valid after `stop`. An answer longer than 2,000 characters arrives as its first 2,000 characters and that path; `subagent last` also prints it whole. An idle parent starts a turn for the message; a busy parent gets it when its current work is done. Results of several children that are ready at the same time arrive as one message. A result that `subagent wait` prints is not sent again.
 
 Set `PI_SUBAGENT_NOTIFY=0` before you start Pi to turn the messages off. Print and JSON modes end with the turn, so there the agent uses `wait`.
 
@@ -127,11 +127,13 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard. When `packages` has no guard, `spawn` prints a warning. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
-| `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch. Past it, the child is stopped and reported as `timed out`; its run and transcript stay. |
+| `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch and from each new turn of an idle child. A child still working past it is stopped and reported as `timed out`; its run and transcript stay. A child that answered and is idle is not stopped. |
 
 ## Agent files
 
 An agent file holds a role, so each `spawn` does not repeat its settings. `subagent spawn --agent implementer` reads `implementer.md` from `.pi/agents/` in the current directory, then from `~/.pi/agent/agents/`. A project file overrides a global file with the same name. An unknown name fails and starts nothing.
+
+A project agent file comes from the repository, not from you, so it cannot load code: `spawn` ignores its `extensions` field, keeps the default extensions and the command guard, and prints one warning that names the file. Only a global agent file or `--extensions` on `spawn` loads extensions.
 
 ```markdown
 ---
@@ -153,7 +155,7 @@ Load the tdd skill. Commit with a conventional message.
 | `model`       | `--provider` and `--model` for `provider/model`, else `--model`.              |
 | `thinking`    | `--thinking`                                                                  |
 | `tools`       | `--tools`                                                                     |
-| `extensions`  | `--extensions`. A relative path is relative to the agent file.                |
+| `extensions`  | `--extensions`. A relative path is relative to the agent file. Global only.   |
 | `mcp`         | `false` is `--no-mcp`.                                                        |
 | `timeout`     | `--timeout`                                                                   |
 | body          | Added to the child's first prompt, before the `--prompt` text.                |
@@ -323,6 +325,8 @@ The end-to-end check runs the real extension in real Pi processes, with no model
 - a busy child with `--timeout 3s` is stopped by the parent and reported `timed out`
 - `spawn --agent` and `--worktree` start a real child with the agent file's model, in the new worktree
 - parent quit suspends a running child and a queued one; a new parent on the same session resumes them through the queue
+
+CI runs `npm test` and then `npm run verify:e2e` on each push to `main` and each pull request, with Pi `1.5.2` (the version this package is tested with) and no login.
 
 It does not prove what a real model does with the skill and the tool, the Herdr panes, or how the widget looks in the terminal; `check:live` and use do.
 

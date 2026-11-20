@@ -5,8 +5,9 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
-import { markExitKnown, markWaiting } from "./outbox.ts";
-import { openAliveFifo, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { InboxDelivery } from "./inbox.ts";
+import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
+import { inboxDir, openAliveFifo, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -210,6 +211,39 @@ test("while Pi cannot take a message, a child past its time limit is still stopp
 	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
 });
 
+test("a child that answers and goes idle before its 2 s limit is never stopped: one finished message, no timed out", () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	const { run } = liveRun("aaa111", { state: "idle", timeout: "2s", deadline: new Date(Date.now() + 2000).toISOString() });
+	writeResult(run, "finished", "the answer");
+
+	tick.wake();
+	mock.timers.tick(5000);
+
+	assert.deepEqual(tmuxCalls(), []);
+	assert.deepEqual(sent, ["Subagent aaa111 finished\n\nthe answer"]);
+});
+
+test("a child that gets a new message after its deadline is stopped by the limit counted from that turn", () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	const { run } = liveRun("aaa111", { state: "idle", timeout: "2s", deadline: new Date(Date.now() - 60_000).toISOString() });
+	mkdirSync(inboxDir(run.runDir));
+	writeFileSync(join(inboxDir(run.runDir), "1.json"), JSON.stringify({ message: "more", delivery: "auto" }));
+
+	// The child takes the message: a new turn starts, and it stays busy.
+	new InboxDelivery(run.runDir).deliver({ isIdle: () => true, send: () => {}, abort: () => {} });
+	tick.wake();
+	mock.timers.tick(1000);
+	assert.deepEqual(tmuxCalls(), [], "the old deadline does not stop the new turn");
+
+	mock.timers.tick(2000);
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+	assert.match(sent.join(), /^Subagent aaa111 timed out\n/);
+});
+
 test("a queued child keeps the tick, and starts when the last live child ends", async () => {
 	const { tick, shown } = parentTick();
 	const { child } = liveRun("aaa111");
@@ -235,6 +269,18 @@ test("a queued child alone starts on wake", () => {
 	tick.wake();
 
 	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+});
+
+test("a queued child that fails to start gives the parent one message with the error, and the tick stops", () => {
+	writeFileSync(join(root, "bin", "tmux"), `#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\necho 'test launch failure' >&2\nexit 1\n`);
+	const { tick, shown, sent } = parentTick();
+	queuedRun("bbb222");
+
+	tick.wake();
+	mock.timers.tick(5000);
+
+	assert.deepEqual(sent, ["Subagent bbb222 failed to start\n\ntest launch failure"]);
+	assert.deepEqual(shown, [[]]);
 });
 
 test("wake while the tick runs starts no second timer", () => {

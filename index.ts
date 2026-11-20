@@ -13,6 +13,7 @@ import {
 	isLive,
 	listRuns,
 	ownStartTime,
+	nextDeadline,
 	pruneStaleRuns,
 	readMetadata,
 	runDisplayName,
@@ -270,7 +271,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	pi.on("agent_start", (_event, ctx) => {
 		currentContext = ctx;
 		inbox.promptStarted();
-		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined });
+		// A turn from idle that the inbox did not start (typed in the pane): its time limit counts from now.
+		const metadata = readMetadata(runDir);
+		const deadline = metadata?.state === "idle" ? nextDeadline(metadata) : undefined;
+		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined, ...(deadline && { deadline }) });
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
