@@ -365,7 +365,7 @@ function spawnSubagent(callerArgs: string[]): void {
 			: "";
 	const worktreeLine = worktree ? `Worktree: ${cwd} (branch ${worktree})\n` : "";
 	process.stdout.write(
-		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
+		`Spawned ${runDisplayName(metadata)}\n${stateLine(queued, metadata.parentSessionId)}\nAttach: tmux attach -t ${tmuxSession}\n${worktreeLine}${result}`,
 	);
 }
 
@@ -511,7 +511,7 @@ function resumeSubagent(args: string[]): void {
 	if (!prepared) fail(`${metadata.handle} is already resumed`);
 	const queued = prepared.state === "queued";
 	if (!queued) startRun(prepared);
-	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
+	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued, metadata.parentSessionId)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
 }
 
 function lastSubagent(args: string[]): void {
