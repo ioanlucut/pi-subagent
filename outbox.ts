@@ -24,6 +24,8 @@ const outboxDir = (runDir: string): string => join(runDir, "outbox");
 const answersDir = (runDir: string): string => join(runDir, "answers");
 const exitKnownPath = (runDir: string): string => join(runDir, "exit-known");
 const waitingPath = (runDir: string): string => join(runDir, "waiting");
+/** The suffix of a result that the parent tick or `stop` took to send. */
+const TAKEN = ".taken";
 
 /**
  * Whether this Pi delivers results. Print and JSON modes end with the turn, so no later message can
@@ -150,26 +152,66 @@ function hasWaiter(runDir: string): boolean {
 	}
 }
 
-/** The queued results of these runs as one message, with the files to delete after it is sent. */
-export function pendingResults(runs: RunMetadata[]): { text: string; files: string[] } | undefined {
-	const texts: string[] = [];
-	const files: string[] = [];
-	for (const run of runs) {
+/** The queued result files of these runs, oldest first; those of a run a `wait` will print only when `waited`. */
+function resultFiles(runs: RunMetadata[], waited: boolean): string[] {
+	return runs.flatMap((run) => {
 		const dir = outboxDir(run.runDir);
-		if (!existsSync(dir) || hasWaiter(run.runDir)) continue;
-		for (const name of readdirSync(dir)
+		if (!existsSync(dir) || (!waited && hasWaiter(run.runDir))) return [];
+		return readdirSync(dir)
 			.filter((entry) => entry.endsWith(".txt"))
-			.sort()) {
-			const file = join(dir, name);
-			try {
-				texts.push(readFileSync(file, "utf8"));
-				files.push(file);
-			} catch {
-				// Removed since the listing.
-			}
+			.sort()
+			.map((name) => join(dir, name));
+	});
+}
+
+/** The queued results of these runs as one message, left in place. */
+export function pendingResults(runs: RunMetadata[]): { text: string; files: string[] } | undefined {
+	return joined(resultFiles(runs, false).flatMap((file) => readOrSkip(file, file)));
+}
+
+/**
+ * Take the queued results of these runs as one message, with the files to delete after it is sent. The parent
+ * tick and `stop` run in two processes: each takes a result by renaming its file, read before, and only one
+ * rename of it succeeds, so the parent gets a result once, never from both. `waited`: also the results a `wait` holds.
+ */
+export function takeResults(runs: RunMetadata[], { waited = false } = {}): { text: string; files: string[] } | undefined {
+	const taken: { text: string; file: string }[] = [];
+	for (const file of resultFiles(runs, waited)) {
+		const [result] = readOrSkip(file, `${file}${TAKEN}`);
+		if (!result) continue;
+		try {
+			renameSync(file, result.file);
+			taken.push(result);
+		} catch {
+			// The other process took it.
 		}
 	}
-	return files.length > 0 ? { text: texts.join("\n\n---\n\n"), files } : undefined;
+	return joined(taken);
+}
+
+/** A file's text; nothing when it was removed since the listing. */
+function readOrSkip(file: string, name: string): { text: string; file: string }[] {
+	try {
+		return [{ text: readFileSync(file, "utf8"), file: name }];
+	} catch {
+		return [];
+	}
+}
+
+function joined(results: { text: string; file: string }[]): { text: string; files: string[] } | undefined {
+	if (results.length === 0) return undefined;
+	return { text: results.map((result) => result.text).join("\n\n---\n\n"), files: results.map((result) => result.file) };
+}
+
+/** Results taken but not sent: they wait for the next try. */
+export function returnResults(files: string[]): void {
+	for (const file of files) {
+		try {
+			renameSync(file, file.slice(0, -TAKEN.length));
+		} catch {
+			// The run is gone.
+		}
+	}
 }
 
 /**

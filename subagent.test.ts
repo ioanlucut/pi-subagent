@@ -564,6 +564,19 @@ test("after stop, the answer file named in the parent's message still exists, be
 	assert.equal(readFileSync(file ?? "", "utf8"), "Done.");
 });
 
+test("stop right after the child wrote its result prints it, and no message follows", () => {
+	const runDir = transcriptRun("tra555", "/repo/my-app");
+	updateMetadata(runDir, { parentSessionId: "parent" });
+	reportSettledTurn(runDir);
+	const [run] = listRuns("parent");
+
+	const result = runCli(["stop", "tra555"], {});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /^Stopped tra555\nTranscript: .*\n\nSubagent tra555 finished\n\nDone\.\n\n\[The whole answer: \S+\]\n$/);
+	assert.equal(pendingResults([run]), undefined);
+});
+
 test("last prints the latest answer and the state, without waiting", () => {
 	const handle = idleRun({ content: [{ type: "text", text: "All good." }], stopReason: "stop" });
 	const [run] = listRuns();

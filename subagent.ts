@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
-import { clearResults, isExitKnown, markExitKnown, markWaiting } from "./outbox.ts";
+import { clearResults, isExitKnown, markExitKnown, markWaiting, takeResults } from "./outbox.ts";
 import { resumeRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import {
 	assistantText,
@@ -498,9 +498,11 @@ async function stopSubagent(args: string[]): Promise<void> {
 	markExitKnown(metadata.runDir);
 	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
+	// A result the parent has not got yet goes with the run: print it, as `wait` does, so the parent gets it once.
+	const results = takeResults([metadata], { waited: true });
 	const kept = removeRunDir(metadata.runDir);
 	const transcript = kept ? `Transcript: ${kept} (\`pi --resume\` in ${metadata.cwd})\n` : "";
-	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n${transcript}`);
+	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n${transcript}${results ? `\n${results.text}\n` : ""}`);
 }
 
 /**

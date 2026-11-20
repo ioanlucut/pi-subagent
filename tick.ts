@@ -1,6 +1,6 @@
 import { rmSync } from "node:fs";
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
-import { hasResults, isExitKnown, pendingResults, reportExitedRuns } from "./outbox.ts";
+import { hasResults, isExitKnown, reportExitedRuns, returnResults, takeResults } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
@@ -60,10 +60,15 @@ export class SessionTick {
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
 		const inGrace = reportExitedRuns(runs);
-		const pending = pendingResults(runs);
-		if (pending) {
-			deliver.send(pending.text);
-			for (const file of pending.files) rmSync(file, { force: true });
+		const taken = takeResults(runs);
+		if (taken) {
+			try {
+				deliver.send(taken.text);
+			} catch (error) {
+				returnResults(taken.files);
+				throw error;
+			}
+			for (const file of taken.files) rmSync(file, { force: true });
 		}
 		return rows.length > 0 || inGrace || hasResults(runs);
 	}

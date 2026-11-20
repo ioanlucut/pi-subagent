@@ -150,6 +150,12 @@ export function inboxDir(runDir: string): string {
 	return join(runDir, "inbox");
 }
 
+/** Whether a result waits for the parent; the outbox module reads and sends it. */
+function hasOutbox(runDir: string): boolean {
+	const dir = join(runDir, "outbox");
+	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".txt"));
+}
+
 /** Whether a `send` is queued that the child has not taken yet. */
 export function inboxHasMessages(runDir: string): boolean {
 	const dir = inboxDir(runDir);
@@ -569,7 +575,8 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 
 /**
  * The parent quits or leaves the session: suspend its running and queued children, so resuming the session
- * starts them again within 24 h; remove those that already exited on their own.
+ * starts them again within 24 h; remove those that already exited on their own. An exited child whose result
+ * the parent has not sent yet stays as it is, so the tick sends it after resume and the next quit removes it.
  */
 export async function suspendSessionRuns(sessionId: string): Promise<void> {
 	const runs = listRuns(sessionId);
@@ -579,7 +586,7 @@ export async function suspendSessionRuns(sessionId: string): Promise<void> {
 	}
 	const started = runs.filter((run) => run.state !== "queued");
 	const exists = await Promise.all(started.map((run) => tmuxAsync(["has-session", "-t", run.tmuxSession])));
-	for (const run of started.filter((run, i) => !exists[i] && !run.suspended)) skippingBusyRun(() => removeRunDir(run.runDir));
+	for (const run of started.filter((run, i) => !exists[i] && !run.suspended && !hasOutbox(run.runDir))) skippingBusyRun(() => removeRunDir(run.runDir));
 	await suspendRuns(started.filter((_run, i) => exists[i]));
 }
 
