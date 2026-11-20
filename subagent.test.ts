@@ -972,6 +972,27 @@ test("a child suspended 25 hours ago stays suspended after resume, and list show
 	assert.match(runCli(["status", byName("c0").handle], {}).stdout, /^c0 \(\w+\): suspended /);
 });
 
+test("quit with one run whose lock a live foreign process holds suspends the others and still ends its tmux session", async () => {
+	spawnChildren(3, { PI_SESSION_ID: "parent" });
+	const [locked, ...others] = listRuns();
+	await Promise.all(listRuns().map(startedChild));
+	// A lock that names a live process which is not its holder: a holder killed, and its process ID reused.
+	const holder = spawn("sleep", ["60"], { stdio: "ignore" });
+	writeFileSync(join(locked.runDir, "metadata.lock"), `${holder.pid} reused`);
+
+	try {
+		await suspendSessionRuns("parent");
+	} finally {
+		holder.kill("SIGKILL");
+	}
+
+	assert.equal(tmuxSessionExists(locked.tmuxSession), false, "no child outlives the quit");
+	for (const run of others) {
+		assert.equal(tmuxSessionExists(run.tmuxSession), false);
+		assert.equal(readMetadata(run.runDir)?.suspended, true);
+	}
+});
+
 test("a queued child is suspended when its parent quits: after 25 h it stays suspended, and a recent one starts with its prompt", async () => {
 	spawnMany(4, queueEnv);
 	await suspendSessionRuns("parent");

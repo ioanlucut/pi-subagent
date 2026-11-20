@@ -16,7 +16,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { withLock } from "./lock.ts";
+import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost, withLock } from "./lock.ts";
 
 const launcherPath = join(dirname(fileURLToPath(import.meta.url)), "launcher.ts");
 
@@ -541,11 +541,14 @@ export function assistantText(message: AssistantMessage): string {
 export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	for (const run of runs) {
 		// A child that has not recorded its process ID never writes `exited`: the parent marks it, so it is not alive in its grace time.
-		updateMetadata(run.runDir, (current) => ({
-			suspended: true,
-			suspendedAt: new Date().toISOString(),
-			...(current.childPid === null && { state: "exited" as const }),
-		}));
+		skippingBusyRun(() =>
+			updateMetadata(run.runDir, (current) => ({
+				suspended: true,
+				suspendedAt: new Date().toISOString(),
+				...(current.childPid === null && { state: "exited" as const }),
+			})),
+		);
+		// Also when its lock is busy: no child may outlive the quit.
 		spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
@@ -561,11 +564,26 @@ export async function suspendSessionRuns(sessionId: string): Promise<void> {
 	for (const run of listRuns(sessionId)) {
 		if (run.state === "queued") {
 			// Never started: its saved launch keeps the first prompt for resume.
-			updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() });
+			skippingBusyRun(() => updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() }));
 		} else if (tmuxSessionExists(run.tmuxSession)) running.push(run);
-		else if (!run.suspended) removeRunDir(run.runDir);
+		else if (!run.suspended) skippingBusyRun(() => removeRunDir(run.runDir));
 	}
 	await suspendRuns(running);
+}
+
+/**
+ * Run `fn`, the work on one run of a loop over many, such as the quit path. A lock that names a live process which
+ * is not its holder (a holder killed and its process ID reused, or a stopped one) is never taken over: that
+ * run is reported once and skipped, so the other runs are still handled. Its lock waits are as short as a
+ * tick's, as a real hold takes a few ms: a quit must not wait 6 s for each such run.
+ */
+export function skippingBusyRun(fn: () => void, onBusy = (message: string) => console.error(message)): void {
+	try {
+		waitingAtMost(TICK_LOCK_WAIT_MS, fn);
+	} catch (error) {
+		if (!(error instanceof LockBusyError)) throw error;
+		onBusy(error.message);
+	}
 }
 
 /** Suspend running children whose parent process died without its shutdown handler (crash, kill -9, lost terminal). */
