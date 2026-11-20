@@ -21,7 +21,7 @@ Each subagent is a full Pi in its own tmux session, with its own JSONL transcrip
 | **Fast parent** | The parent checks its children with no program start, and only while it has children. A session with no children does no subagent work. On a busy machine this was the difference between a frozen Pi and a responsive one. |
 | **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. |
 | **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. |
-| **Verified** | `npm test` (166 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login), the last two also in CI. See Development. |
+| **Verified** | `npm test` (173 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login), the last two also in CI. See Development. |
 
 This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at). Upstream has issues and pull requests disabled, so the changes live here. Upstream gives each child a tmux session and its transcript, the CLI (`spawn`, `list`, `status`, `wait`, `send` with `--follow-up`, `stop`), attaching to a child's TUI, and suspend and resume with the parent session. This fork adds the rest of the table, including the model tool, result messages, the rows and Herdr panes, the queue, time limits, agent files, light children, worktrees, the fast parent, and the locks. Two upstream bugs are fixed:
 
