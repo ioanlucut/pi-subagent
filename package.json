@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check:live": "node live-check.ts"
+    "check:live": "node live-check.ts",
+    "verify:spec": "node verify-spec.ts",
+    "verify:e2e": "node verify-e2e.ts"
   },
   "bin": {
     "subagent": "./subagent.ts"
@@ -15,7 +17,9 @@
     "extensions": ["./index.ts"]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   }
 }

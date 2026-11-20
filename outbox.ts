@@ -4,21 +4,23 @@ import {
 	assistantText,
 	effectiveRunState,
 	inboxHasMessages,
+	inStartingGrace,
+	keptTranscriptPath,
 	readLatestAssistant,
 	readMetadata,
 	runDisplayName,
 	turnOutcome,
 	type RunMetadata,
+	updateMetadata,
 } from "./shared.ts";
 
-/** tmux starts just after the metadata is written; a run this young with no tmux session has not died. */
-const STARTING_GRACE_MS = 30_000;
-/** A longer answer is cut, so one result cannot fill the parent's context. */
-const MAX_RESULT_CHARS = 16_000;
+/** A longer answer reaches the parent as its start and the path of the whole, so results do not fill the parent's context. */
+const SUMMARY_CHARS = 2_000;
 /** `wait` renews its claim each 500 ms; an older claim is from a `wait` that was killed. */
 const WAITING_MS = 2_000;
 
 const outboxDir = (runDir: string): string => join(runDir, "outbox");
+const answersDir = (runDir: string): string => join(runDir, "answers");
 const exitKnownPath = (runDir: string): string => join(runDir, "exit-known");
 const waitingPath = (runDir: string): string => join(runDir, "waiting");
 
@@ -34,7 +36,7 @@ export function claimResultDelivery(mode: string): boolean {
 }
 
 /** Queue one result for the parent. Never creates the run directory: `stop` may have removed it. */
-function writeResult(run: RunMetadata, outcome: string, body: string): void {
+export function writeResult(run: RunMetadata, outcome: string, body: string): void {
 	const dir = outboxDir(run.runDir);
 	try {
 		if (!existsSync(dir)) mkdirSync(dir, { mode: 0o700 });
@@ -46,6 +48,27 @@ function writeResult(run: RunMetadata, outcome: string, body: string): void {
 	}
 }
 
+/**
+ * Save the answer and return the text the parent gets: a long answer as its start, each with the path of the
+ * whole. The file sits beside the place the transcript is kept on `stop`, so the path stays valid after it;
+ * one file per turn, so an older message keeps pointing at its own answer.
+ */
+function summarize(run: RunMetadata, text: string): string {
+	const kept = keptTranscriptPath(run.sessionFile);
+	// No session header yet: the run directory, as nothing else names the transcript.
+	const dir = kept ? kept.replace(/\.jsonl$/, ".answers") : answersDir(run.runDir);
+	const file = join(dir, `${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+	try {
+		// The run directory is never created again: `stop` may have removed it.
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: Boolean(kept), mode: 0o700 });
+		writeFileSync(file, text, { mode: 0o600 });
+	} catch {
+		return text; // The run is gone; writeResult drops the message too.
+	}
+	if (text.length <= SUMMARY_CHARS) return `${text}\n\n[The whole answer: ${file}]`;
+	return `${text.slice(0, SUMMARY_CHARS)}\n\n[First ${SUMMARY_CHARS} of ${text.length} characters. The whole answer: ${file}]`;
+}
+
 /** The child calls this when its turn ends: the parent session gets the answer as a message. */
 export function reportSettledTurn(runDir: string): void {
 	const run = readMetadata(runDir);
@@ -55,12 +78,12 @@ export function reportSettledTurn(runDir: string): void {
 	if (run.suspended || existsSync(exitKnownPath(runDir))) return;
 	const message = readLatestAssistant(run.sessionFile);
 	if (!message) return;
-	const text = assistantText(message);
-	const body =
-		text.length <= MAX_RESULT_CHARS
-			? text
-			: `${text.slice(0, MAX_RESULT_CHARS)}\n\n[Cut at ${MAX_RESULT_CHARS} of ${text.length} characters. The whole answer: \`subagent last ${run.handle}\`, before \`stop\`.]`;
-	writeResult(run, turnOutcome(message), body);
+	writeResult(run, turnOutcome(message), summarize(run, assistantText(message)));
+}
+
+/** Whether `stop` or the parent ended the child, so its end is no news to the parent. */
+export function isExitKnown(runDir: string): boolean {
+	return existsSync(exitKnownPath(runDir));
 }
 
 /** `stop` calls this before it ends the child, so the end is not reported as a surprise. */
@@ -72,14 +95,27 @@ export function markExitKnown(runDir: string): void {
 	}
 }
 
-/** The parent calls this for its runs: a child whose process ended by itself is reported, once. */
-export function reportExitedRuns(runs: RunMetadata[]): void {
+/** A suspended run queued again: its new launch is news to the parent. */
+export function clearExitKnown(runDir: string): void {
+	rmSync(exitKnownPath(runDir), { force: true });
+}
+
+/**
+ * The parent calls this for its runs: a child whose process ended by itself is reported, once. Returns
+ * whether a run with no process yet is still in its grace time, so a later call can report it.
+ */
+export function reportExitedRuns(runs: RunMetadata[]): boolean {
+	let waiting = false;
 	for (const run of runs) {
 		if (run.suspended || existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) !== "exited") continue;
-		if (run.state === "starting" && Date.now() - Date.parse(run.updatedAt) < STARTING_GRACE_MS) continue;
+		if (inStartingGrace(run)) {
+			waiting = true;
+			continue;
+		}
 		markExitKnown(run.runDir);
 		writeResult(run, "exited", "Its process ended and nobody stopped it. Spawn the task again if you still need the result.");
 	}
+	return waiting;
 }
 
 /** `wait` calls this on each poll: it prints the result itself, so the parent must not get it as a message too. */
@@ -119,6 +155,14 @@ export function pendingResults(runs: RunMetadata[]): { text: string; files: stri
 		}
 	}
 	return files.length > 0 ? { text: texts.join("\n\n---\n\n"), files } : undefined;
+}
+
+/**
+ * Whether a result of these runs is still to be sent, also one a `wait` holds: a `wait` that was cancelled
+ * stops renewing its claim, and the parent must still be there to send the result when the claim expires.
+ */
+export function hasResults(runs: RunMetadata[]): boolean {
+	return runs.some((run) => existsSync(outboxDir(run.runDir)) && readdirSync(outboxDir(run.runDir)).some((entry) => entry.endsWith(".txt")));
 }
 
 /** `wait` calls this after it printed the result. */
