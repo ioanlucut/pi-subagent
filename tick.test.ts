@@ -364,6 +364,23 @@ test("two ticks that both list one queued run start it once, and the run stays l
 	assert.equal(readMetadata(run.runDir)?.state, "starting");
 });
 
+test("two ticks of one session that list two queued runs at a limit of 1 start exactly one", async () => {
+	const first = queuedRun("aaa111");
+	const second = queuedRun("bbb222");
+	// Two parents of one session list both runs before either starts one.
+	const one = listRuns("parent");
+	const two = listRuns("parent");
+	const errors: string[] = [];
+
+	startQueuedRuns(one, (_run, message) => errors.push(message));
+	startQueuedRuns(two, (_run, message) => errors.push(message));
+	await settleTmuxCalls();
+
+	assert.deepEqual(started(), ["pi-subagent-aaa111"]);
+	assert.deepEqual(errors, []);
+	assert.deepEqual([readMetadata(first.runDir)?.state, readMetadata(second.runDir)?.state], ["starting", "queued"]);
+});
+
 test("a tick waits about 200 ms for a run lock a stalled process holds, and starts the run on a later tick", async () => {
 	const run = queuedRun("bbb222");
 	// A live process that holds the run's lock, as a CLI stopped with Ctrl-Z would.

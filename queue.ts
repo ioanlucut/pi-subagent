@@ -15,6 +15,7 @@ import {
 	readMetadata,
 	removeRunDir,
 	type RunMetadata,
+	skippingBusyRun,
 	startLaunch,
 	startLaunchAsync,
 	tmuxSessionExists,
@@ -70,22 +71,29 @@ export function resumeRun(run: RunMetadata, mayQueue: boolean, patch: Partial<Ru
 
 /**
  * Run `write` with whether a new live run of `sessionId` must queue, under the session lock.
- *
- * The lock holds for milliseconds and starts no program: a run of an older version, which only tmux can
- * tell alive, is asked before it. A run that appears in between counts as live, which can only queue.
  */
 function countedWrite<T>(sessionId: string | undefined, write: (queued: boolean) => T): T {
+	if (sessionId === undefined) return write(mustQueue(sessionId));
+	// Only `mustQueue` with PI_SUBAGENT_QUEUE counts: no tmux call for a caller that never queues.
+	const runs = process.env.PI_SUBAGENT_QUEUE === "1" ? listRuns(sessionId) : [];
+	return countedUnderLock(sessionId, runs, (sessionExists) => write(mustQueue(sessionId, sessionExists)));
+}
+
+/**
+ * Run `fn` under the session lock, with a liveness answer for runs that only tmux can tell alive.
+ *
+ * The lock holds for milliseconds and starts no program: a run of an older version among `runs` is asked
+ * before it. A run that appears in between counts as live, which can only queue.
+ */
+function countedUnderLock<T>(sessionId: string, runs: RunMetadata[], fn: (sessionExists: (session: string) => boolean) => T): T {
 	const sessions = new Map<string, boolean>();
-	if (sessionId !== undefined && process.env.PI_SUBAGENT_QUEUE === "1") {
-		for (const other of listRuns(sessionId)) {
-			effectiveRunState(other, (session) => {
-				sessions.set(session, tmuxSessionExists(session));
-				return sessions.get(session) as boolean;
-			});
-		}
+	for (const other of runs) {
+		effectiveRunState(other, (session) => {
+			sessions.set(session, tmuxSessionExists(session));
+			return sessions.get(session) as boolean;
+		});
 	}
-	const locked = () => write(mustQueue(sessionId, (session) => sessions.get(session) ?? true));
-	return sessionId === undefined ? locked() : withSessionLock(sessionId, locked);
+	return withSessionLock(sessionId, () => fn((session) => sessions.get(session) ?? true));
 }
 
 /** The `State:` line that `spawn` and `resume` print. */
@@ -169,15 +177,48 @@ function liveRunCount(runs: RunMetadata[], sessionExists = tmuxSessionExists): n
  * The parent tick: start the queued ones of the session's `runs`, oldest first, while fewer than the limit
  * run. Returns the runs as they are after the claims, so the tick lists the run directory once.
  *
- * The claim is synchronous, under the run's lock, so the slot is taken at once; the tmux start runs in a
- * child process, as on a busy machine it takes a second or more and the tick runs on Pi's UI thread. A
- * start that fails is reported once when tmux ends; `settleTmuxCalls` waits for it.
+ * The count and the claims hold the session lock, as for `spawn` and `resume`: two parents of one session
+ * (two Pi, or a Pi and a resumed one) must not both see the last free slot. So the count is made again on
+ * the runs as they are under the lock. The tmux start follows outside the lock, in a child process, as on a
+ * busy machine it takes a second or more and the tick runs on Pi's UI thread. A start that fails is reported
+ * once when tmux ends; `settleTmuxCalls` waits for it.
  */
 export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata, message: string) => void): RunMetadata[] {
 	// No queued run: no liveness check, so the tick costs only the listing.
-	if (!runs.some((run) => run.state === "queued")) return runs;
-	let free = runLimit() - liveRunCount(runs);
-	return runs.flatMap((run) => {
+	const sessionId = runs.find((run) => run.state === "queued")?.parentSessionId;
+	if (sessionId === undefined) return runs;
+	let result: { runs: RunMetadata[]; claimed: Extract<Claim, { claimed: true }>[] };
+	try {
+		result = countedUnderLock(sessionId, runs, (sessionExists) => claimQueuedRuns(listRuns(sessionId), sessionExists));
+	} catch (error) {
+		// The session lock is held, by a stalled process: nothing changed, the next tick tries again.
+		if (error instanceof LockBusyError) return runs;
+		throw error;
+	}
+	for (const claimed of result.claimed) {
+		track(
+			startLaunchAsync(claimed.run).catch((error: unknown) => {
+				// Known first, so neither the tick nor the time limit reports it again.
+				markExitKnown(claimed.run.runDir);
+				try {
+					waitingAtMost(TICK_LOCK_WAIT_MS, () => launchFailed(claimed, error));
+				} catch (failure) {
+					// A stalled process holds the lock: the run stays `starting` until its grace time ends; known, it is not reported as exited.
+					if (!(failure instanceof LockBusyError)) throw failure;
+				}
+				writeResult(claimed.run, "failed to start", errorText(error));
+				onError(claimed.run, errorText(error));
+			}),
+		);
+	}
+	return result.runs;
+}
+
+/** Under the session lock: claim the queued ones of `runs` while a slot is free. Starts no program. */
+function claimQueuedRuns(runs: RunMetadata[], sessionExists: (session: string) => boolean) {
+	let free = runLimit() - liveRunCount(runs, sessionExists);
+	const claimed: Extract<Claim, { claimed: true }>[] = [];
+	const after = runs.flatMap((run) => {
 		if (free <= 0 || run.state !== "queued") return [run];
 		// Its `spawn` or `resume` has not saved the launch yet: tmux would start nothing. A later tick starts it.
 		if (!existsSync(join(run.runDir, "launch.json"))) return [run];
@@ -194,23 +235,10 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 		if (!claim.run) return [];
 		if (!claim.claimed) return [claim.run];
 		free--;
-		const claimed = claim;
-		track(
-			startLaunchAsync(claimed.run).catch((error: unknown) => {
-				// Known first, so neither the tick nor the time limit reports it again.
-				markExitKnown(run.runDir);
-				try {
-					waitingAtMost(TICK_LOCK_WAIT_MS, () => launchFailed(claimed, error));
-				} catch (failure) {
-					// A stalled process holds the lock: the run stays `starting` until its grace time ends; known, it is not reported as exited.
-					if (!(failure instanceof LockBusyError)) throw failure;
-				}
-				writeResult(run, "failed to start", errorText(error));
-				onError(run, errorText(error));
-			}),
-		);
-		return [claimed.run];
+		claimed.push(claim);
+		return [claim.run];
 	});
+	return { runs: after, claimed };
 }
 
 const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -253,13 +281,15 @@ export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting"
 export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadata, message: string) => void): void {
 	for (const run of listRuns(sessionId)) {
 		if (!run.suspended || run.state === "queued" || tmuxSessionExists(run.tmuxSession)) continue;
-		// A run that never started has no transcript, but its saved launch still holds its task.
-		if (!existsSync(run.sessionFile) && !existsSync(join(run.runDir, "launch.json"))) {
-			removeRunDir(run.runDir);
-			continue;
-		}
-		if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) > RESUME_WINDOW_MS) continue;
-		claimSuspendedRun(run, "queued");
+		// A run whose lock a stalled process holds is reported once and skipped; the others still resume.
+		skippingBusyRun(
+			() => {
+				// A run that never started has no transcript, but its saved launch still holds its task.
+				if (!existsSync(run.sessionFile) && !existsSync(join(run.runDir, "launch.json"))) removeRunDir(run.runDir);
+				else if (Date.now() - Date.parse(run.suspendedAt ?? run.updatedAt) <= RESUME_WINDOW_MS) claimSuspendedRun(run, "queued");
+			},
+			(message) => onError(run, message),
+		);
 	}
 	startQueuedRuns(listRuns(sessionId), onError);
 }
