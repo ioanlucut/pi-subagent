@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
-import { queueSuspendedRun } from "./queue.ts";
+import { claimSuspendedRun } from "./queue.ts";
 import { settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
@@ -288,7 +288,7 @@ test("a resumed child that never reports in is stopped at its deadline and repor
 	const { run, child } = liveRun("aaa111", { state: "exited", suspended: true, timeout: "1s" });
 	child.kill("SIGKILL");
 	prepareLaunch(run);
-	queueSuspendedRun(run);
+	claimSuspendedRun(run, "queued");
 
 	// The tick starts it; its child never records its process ID, so it stays `starting`.
 	tick.wake();

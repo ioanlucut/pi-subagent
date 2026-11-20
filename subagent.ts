@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findAgent, listAgents } from "./agents.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting } from "./outbox.ts";
-import { mustQueue, queueSuspendedRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
+import { resumeRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -495,12 +495,14 @@ function resumeSubagent(args: string[]): void {
 	const metadata = getRun(args[0]);
 	if (!metadata.suspended || metadata.state === "queued" || tmuxSessionExists(metadata.tmuxSession)) fail(`${metadata.handle} is not suspended`);
 	// Only the tick of the parent session's own Pi starts its queued runs.
-	const queued = metadata.parentSessionId === process.env.PI_SESSION_ID && mustQueue(metadata.parentSessionId);
+	const mayQueue = metadata.parentSessionId === process.env.PI_SESSION_ID;
 	// This caller is the parent now, as for `spawn`, so the orphan sweep follows it.
-	const prepared = queueSuspendedRun(metadata, {
+	const prepared = resumeRun(metadata, mayQueue, {
 		parentPid: Number(process.env.PI_SUBAGENT_PARENT_PID) || undefined,
 		parentStarted: process.env.PI_SUBAGENT_PARENT_STARTED || undefined,
 	});
+	if (!prepared) fail(`${metadata.handle} is already resumed`);
+	const queued = prepared.state === "queued";
 	if (!queued) startRun(prepared);
 	process.stdout.write(`Resumed ${runDisplayName(metadata)}\n${stateLine(queued)}\nAttach: tmux attach -t ${metadata.tmuxSession}\n`);
 }
