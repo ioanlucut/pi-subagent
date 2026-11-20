@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
-import { inboxDir, openAliveFifo, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { queueSuspendedRun } from "./queue.ts";
+import { inboxDir, openAliveFifo, prepareLaunch, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -259,6 +260,24 @@ test("a child that gets a new message after its deadline is stopped by the limit
 	mock.timers.tick(2000);
 	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
 	assert.match(sent.join(), /^Subagent aaa111 timed out\n/);
+});
+
+test("a resumed child that never reports in is stopped at its deadline and reported once as timed out", () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	const { run, child } = liveRun("aaa111", { state: "exited", suspended: true, timeout: "1s" });
+	child.kill("SIGKILL");
+	prepareLaunch(run);
+	queueSuspendedRun(run);
+
+	// The tick starts it; its child never records its process ID, so it stays `starting`.
+	tick.wake();
+	mock.timers.tick(3000);
+
+	assert.deepEqual(tmuxCalls().slice(1), ["kill-session -t pi-subagent-aaa111"]);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^Subagent aaa111 timed out\n/);
 });
 
 test("a queued child keeps the tick, and starts when the last live child ends", async () => {

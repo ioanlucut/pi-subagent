@@ -50,14 +50,22 @@ export function stateLine(queued: boolean): string {
  * Start a run whose launch is saved: mark it `starting`, with `patch`, and start its tmux session. A launch
  * that fails leaves the run `error` and throws. Returns the run as it is after the start, or undefined when
  * `stop` removed it.
+ *
+ * A resumed run is no longer `suspended` from here: the time limit skips suspended runs, so a child that is
+ * slow to start, or never starts, would otherwise pass its deadline unseen.
  */
 export function startRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
-	const starting = updateMetadata(run.runDir, { ...patch, state: "starting" });
+	let suspended: boolean | undefined;
+	const starting = updateMetadata(run.runDir, (current) => {
+		suspended = current.suspended;
+		return { ...patch, state: "starting", suspended: undefined };
+	});
 	if (!starting) return undefined;
 	try {
 		startLaunch(starting);
 	} catch (error) {
-		updateMetadata(run.runDir, { state: "error", error: error instanceof Error ? error.message : String(error) });
+		// Still suspended, so the next resume tries it again.
+		updateMetadata(run.runDir, { state: "error", suspended, error: error instanceof Error ? error.message : String(error) });
 		throw error;
 	}
 	// Read again: the launch wrote a new deadline.
@@ -101,7 +109,7 @@ const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Put a suspended run in the queue, with the caller's environment for its launch. It stays `suspended`
- * until its child starts, so a launch that fails is tried again on the next resume.
+ * until `startRun` launches it, so a launch that fails is tried again on the next resume.
  */
 export function queueSuspendedRun(run: RunMetadata, patch: Partial<RunMetadata> = {}): RunMetadata {
 	const queued =

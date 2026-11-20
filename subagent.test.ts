@@ -228,6 +228,7 @@ test("a failed relaunch leaves no launch file with the caller's environment behi
 
 	assert.deepEqual(errors, ["no server"]);
 	assert.equal(existsSync(join(run.runDir, "launch.json")), false);
+	assert.equal(readMetadata(run.runDir)?.suspended, true, "still suspended, so the next resume tries it again");
 });
 
 test("suspendRuns stops all children at the same time", async () => {
