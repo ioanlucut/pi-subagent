@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import {
 	assistantText,
 	effectiveRunState,
 	inboxHasMessages,
 	inStartingGrace,
 	keptTranscriptPath,
+	lastPaneLines,
 	listRuns,
 	readLatestAssistant,
 	readMetadata,
@@ -24,8 +25,15 @@ const outboxDir = (runDir: string): string => join(runDir, "outbox");
 const answersDir = (runDir: string): string => join(runDir, "answers");
 const exitKnownPath = (runDir: string): string => join(runDir, "exit-known");
 const waitingPath = (runDir: string): string => join(runDir, "waiting");
-/** The suffix of a result that the parent tick or `stop` took to send. */
+/** The suffix of a result that `stop` took to print. */
 const TAKEN = ".taken";
+/** The suffix of a result the parent tick sent, kept until the message is in the parent's session. */
+const SENT = ".sent";
+/**
+ * A sent result the session still lacks after this is sent again: its turn was cut, or Pi rejected it. Not at
+ * once: Pi is idle for a moment before a message sent at the end of a turn starts the next one.
+ */
+const RESEND_MS = 5_000;
 
 /**
  * Whether this Pi delivers results. Print and JSON modes end with the turn, so no later message can
@@ -125,12 +133,19 @@ export function reportExitedRuns(runs: RunMetadata[]): boolean {
 	let waiting = false;
 	for (const run of runs) {
 		if (run.suspended || existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) !== "exited") continue;
-		if (inStartingGrace(run)) {
+		const lines = run.childPid === null ? lastPaneLines(run.runDir) : undefined;
+		if (lines === undefined && inStartingGrace(run)) {
 			waiting = true;
 			continue;
 		}
 		markExitKnown(run.runDir);
-		writeResult(run, "exited", "Its process ended and nobody stopped it. Spawn the task again if you still need the result.");
+		writeResult(
+			run,
+			"exited",
+			lines === undefined
+				? "Its process ended and nobody stopped it. Spawn the task again if you still need the result."
+				: `Its process ended before it started. Its last lines:\n\n${lines}\n\nFix the cause, then spawn the task again.`,
+		);
 	}
 	return waiting;
 }
@@ -153,12 +168,12 @@ function hasWaiter(runDir: string): boolean {
 }
 
 /** The queued result files of these runs, oldest first; those of a run a `wait` will print only when `waited`. */
-function resultFiles(runs: RunMetadata[], waited: boolean): string[] {
+function resultFiles(runs: RunMetadata[], waited: boolean, suffix = ".txt"): string[] {
 	return runs.flatMap((run) => {
 		const dir = outboxDir(run.runDir);
 		if (!existsSync(dir) || (!waited && hasWaiter(run.runDir))) return [];
 		return readdirSync(dir)
-			.filter((entry) => entry.endsWith(".txt"))
+			.filter((entry) => entry.endsWith(suffix))
 			.sort()
 			.map((name) => join(dir, name));
 	});
@@ -187,6 +202,57 @@ export function takeResults(runs: RunMetadata[], { waited = false } = {}): { tex
 		}
 	}
 	return joined(taken);
+}
+
+/** The name of a result in the parent's session: its run's handle and its file name. */
+function resultId(file: string): string {
+	return `${basename(join(file, "..", ".."))}/${basename(file).replace(/\.(txt|sent)$/, "")}`;
+}
+
+/**
+ * The results the parent tick sends now, as one message and the names the parent's session records it by.
+ * Pi holds a sent message in memory until its turn starts, where Escape, a quit, or a rejected start drops it,
+ * so each file stays, as `.sent`, until `forgetDeliveredResults` finds it in the session; one the session still
+ * lacks after `RESEND_MS` is sent again. The rename makes the tick and `stop` take a result once, never both.
+ */
+export function takeResultsToSend(runs: RunMetadata[]): { text: string; results: string[] } | undefined {
+	const due = resultFiles(runs, false, SENT).filter((file) => isOlderThan(file, RESEND_MS));
+	const taken = resultFiles(runs, false).flatMap((file) => {
+		const sent = file.replace(/\.txt$/, SENT);
+		try {
+			renameSync(file, sent);
+			return [sent];
+		} catch {
+			return []; // `stop` took it.
+		}
+	});
+	const results = [...due, ...taken].flatMap((file) => readOrSkip(file, file));
+	const now = new Date();
+	for (const { file } of results) {
+		try {
+			utimesSync(file, now, now);
+		} catch {
+			// `wait` or `stop` removed it since.
+		}
+	}
+	const message = joined(results);
+	return message && { text: message.text, results: message.files.map(resultId) };
+}
+
+/** Drop the sent results that are in the parent's session. `delivered` is read only when one waits. */
+export function forgetDeliveredResults(runs: RunMetadata[], delivered: () => ReadonlySet<string>): void {
+	const sent = resultFiles(runs, true, SENT);
+	if (sent.length === 0) return;
+	const inSession = delivered();
+	for (const file of sent) if (inSession.has(resultId(file))) rmSync(file, { force: true });
+}
+
+function isOlderThan(file: string, ms: number): boolean {
+	try {
+		return Date.now() - statSync(file).mtimeMs >= ms;
+	} catch {
+		return false;
+	}
 }
 
 /** A file's text; nothing when it was removed since the listing. */
@@ -219,7 +285,7 @@ export function returnResults(files: string[]): void {
  * stops renewing its claim, and the parent must still be there to send the result when the claim expires.
  */
 export function hasResults(runs: RunMetadata[]): boolean {
-	return runs.some((run) => existsSync(outboxDir(run.runDir)) && readdirSync(outboxDir(run.runDir)).some((entry) => entry.endsWith(".txt")));
+	return runs.some((run) => existsSync(outboxDir(run.runDir)) && readdirSync(outboxDir(run.runDir)).some((entry) => entry.endsWith(".txt") || entry.endsWith(SENT)));
 }
 
 /** `wait` calls this after it printed the result. */

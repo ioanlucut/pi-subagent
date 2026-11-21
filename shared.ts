@@ -64,6 +64,16 @@ export interface RunMetadata {
 	 * parent gets a result; with none it resumes idle.
 	 */
 	cutWork?: "first-prompt" | "continue";
+	/** When the child's session started, written by the child: a first prompt that Pi has not accepted 15 s later failed. */
+	sessionStartedAt?: string;
+	/** Set by the child when Pi accepted its first prompt (`before_agent_start`): extensions may still hold the turn's start. */
+	promptAccepted?: boolean;
+	/** Written by the child when its Pi asks whether to trust `cwd`, before its session starts; cleared when it starts. */
+	waitsForTrust?: { cwd: string; since: string };
+	/** Set by the parent when it told the parent session about `waitsForTrust`, so it does so once. */
+	trustReported?: boolean;
+	/** Set by the parent when it stops a child whose first prompt never became a turn. */
+	failedToStart?: boolean;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -156,10 +166,10 @@ export function inboxDir(runDir: string): string {
 	return join(runDir, "inbox");
 }
 
-/** Whether a result waits for the parent; the outbox module reads and sends it. */
+/** Whether a result waits for the parent, also one sent that is not in its session yet; the outbox module reads and sends it. */
 function hasOutbox(runDir: string): boolean {
 	const dir = join(runDir, "outbox");
-	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".txt"));
+	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".txt") || file.endsWith(".sent"));
 }
 
 /** Whether a `send` is queued that the child has not taken yet. */
@@ -370,6 +380,11 @@ export function saveFirstPrompt(runDir: string, initialArgs: string[]): void {
 	writeFileSync(firstPromptPath(runDir), JSON.stringify(initialArgs), { encoding: "utf8", mode: 0o600 });
 }
 
+/** Whether the run has a first prompt that no turn has ended yet: kept from `spawn`, dropped when a turn ends. */
+export function hasFirstPrompt(runDir: string): boolean {
+	return existsSync(firstPromptPath(runDir));
+}
+
 /** The child calls this when a turn ends: its transcript now holds the first prompt. */
 export function dropFirstPrompt(runDir: string): void {
 	rmSync(firstPromptPath(runDir), { force: true });
@@ -397,6 +412,7 @@ export function nextDeadline(metadata: RunMetadata): string | undefined {
 
 /** Start the tmux session of a run whose launch `prepareLaunch` saved. Throws when tmux fails. */
 export function startLaunch(metadata: RunMetadata): void {
+	rmSync(panePath(metadata.runDir), { force: true });
 	const result = spawnSync("tmux", newSessionArgs(metadata), { encoding: "utf8" });
 	if (result.status !== 0) launchFailed(metadata, result.stderr);
 }
@@ -406,6 +422,7 @@ export function startLaunch(metadata: RunMetadata): void {
  * program start does not block the tick. Rejects when tmux fails.
  */
 export function startLaunchAsync(metadata: RunMetadata): Promise<void> {
+	rmSync(panePath(metadata.runDir), { force: true });
 	return new Promise((resolveLaunch, rejectLaunch) => {
 		execFile("tmux", newSessionArgs(metadata), { encoding: "utf8" }, (error, _stdout, stderr) => {
 			try {
@@ -439,7 +456,43 @@ function newSessionArgs(metadata: RunMetadata): string[] {
 		process.execPath,
 		launcherPath,
 		join(metadata.runDir, "launch.json"),
+		// When the process ends, save the pane's last lines, then end the session as tmux would: a Pi that
+		// exits at start (an unknown provider) prints its reason there. The path goes in an option, which
+		// tmux does not expand, so a `#` in it stays.
+		";",
+		"set-option",
+		"-t",
+		metadata.tmuxSession,
+		"@pi_subagent_pane",
+		panePath(metadata.runDir),
+		";",
+		"set-option",
+		"-w",
+		"-t",
+		metadata.tmuxSession,
+		"remain-on-exit",
+		"on",
+		";",
+		"set-hook",
+		"-t",
+		metadata.tmuxSession,
+		"pane-died",
+		`capture-pane -b ${metadata.tmuxSession} -S -40 ; save-buffer -b ${metadata.tmuxSession} "#{@pi_subagent_pane}" ; delete-buffer -b ${metadata.tmuxSession} ; kill-session -t ${metadata.tmuxSession}`,
 	];
+}
+
+const panePath = (runDir: string): string => join(runDir, "pane.txt");
+
+/** The last lines of a child's pane, which tmux saves when its process ends; undefined while it runs. */
+export function lastPaneLines(runDir: string): string | undefined {
+	let text: string;
+	try {
+		text = readFileSync(panePath(runDir), "utf8");
+	} catch {
+		return undefined;
+	}
+	// tmux adds `Pane is dead (status 1, <date>)` under the output.
+	return text.split("\n").filter((line) => line.trim() && !line.startsWith("Pane is dead")).slice(-10).join("\n");
 }
 
 function launchFailed(metadata: RunMetadata, stderr: string | undefined): never {
@@ -469,6 +522,16 @@ export function openAliveFifo(runDir: string): number {
 	return openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
 }
 
+/**
+ * The child calls this when its Pi asks whether to trust `cwd`: Pi waits for an answer before the session
+ * starts, so the child records its process ID now. Else the parent would report it `exited` after its grace
+ * time, free its slot, and skip its time limit, while it still waits in its pane.
+ */
+export function recordTrustPrompt(runDir: string, cwd: string): void {
+	holdAliveFifo(runDir);
+	updateMetadata(runDir, { childPid: process.pid, waitsForTrust: { cwd, since: new Date().toISOString() }, trustReported: undefined });
+}
+
 /** The child calls this before it records its process ID, so the parent never sees an ID with no FIFO holder. */
 export function holdAliveFifo(runDir: string): void {
 	try {
@@ -489,7 +552,8 @@ export function holdAliveFifo(runDir: string): void {
  */
 function childIsAlive(metadata: RunMetadata, sessionExists: (session: string) => boolean): boolean {
 	if (metadata.childPid === undefined) return sessionExists(metadata.tmuxSession);
-	if (metadata.childPid === null) return inStartingGrace(metadata);
+	// The saved pane: its process ended before it recorded its ID, so the grace time does not apply.
+	if (metadata.childPid === null) return inStartingGrace(metadata) && !existsSync(panePath(metadata.runDir));
 	try {
 		closeSync(openSync(aliveFifoPath(metadata.runDir), constants.O_WRONLY | constants.O_NONBLOCK));
 		return true;
@@ -639,9 +703,10 @@ function hasUserMessage(sessionFile: string): boolean {
  * The parent quits or leaves the session: suspend its running and queued children, so resuming the session
  * starts them again within 24 h; remove those that already exited on their own. An exited child whose result
  * the parent has not sent yet stays as it is, so the tick sends it after resume and the next quit removes it.
+ * Another Pi on the same session (an observer, `pi --session` in a second terminal) keeps its own children.
  */
 export async function suspendSessionRuns(sessionId: string): Promise<void> {
-	const runs = listRuns(sessionId);
+	const runs = listRuns(sessionId).filter((run) => actsAsParent(run));
 	for (const run of runs.filter((run) => run.state === "queued")) {
 		// Never started: its saved launch keeps the first prompt for resume.
 		skippingBusyRun(() => updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() }));
@@ -689,6 +754,15 @@ function endSessionsWithoutRun(): void {
 		if (dirname(runDir) !== runsDir || existsSync(runDir)) continue;
 		spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
 	}
+}
+
+/**
+ * Whether this Pi is the run's parent: the Pi that owns it, or any Pi of its session when its owner is gone.
+ * `exact: false` starts no program, for the tick: an owner whose process ID was reused still counts as live.
+ */
+export function actsAsParent(run: RunMetadata, { exact = true } = {}): boolean {
+	if (run.parentPid === undefined || run.parentPid === process.pid) return true;
+	return exact ? parentIsGone(run) : !processExists(run.parentPid);
 }
 
 function parentIsGone(run: RunMetadata): boolean {

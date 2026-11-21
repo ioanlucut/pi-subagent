@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "./shared.ts";
 
 /** A role: what `spawn --agent <name>` applies before the caller's own flags. */
@@ -73,19 +73,34 @@ function listValue(value: string): string {
 		.join(",");
 }
 
-/** Every role by name; a project file hides a global one with the same name. */
+function isInside(path: string, dir: string): boolean {
+	const rel = relative(dir, path);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith(sep));
+}
+
+/**
+ * A repository can commit a symlink, so a project agent file could name any file the user can read and
+ * put it in the child's prompt. A project file counts only as a regular file in a directory whose real
+ * path is inside the project; the user's own global files may be links.
+ */
+function isTrustedFile(file: string, dir: string, scope: AgentScope, projectDir: string): boolean {
+	if (scope === "global") return true;
+	if (lstatSync(file).isFile() && isInside(realpathSync(dir), realpathSync(projectDir))) return true;
+	process.stderr.write(`Warning: skipped the project agent file ${file}; it is not a regular file inside the project\n`);
+	return false;
+}
+
+/** Every role by name; a project file hides a global one with the same name. Warns once for each skipped file. */
 export function listAgents(projectDir: string): AgentDefinition[] {
 	const agents = new Map<string, AgentDefinition>();
 	for (const [dir, scope] of agentDirs(projectDir)) {
 		if (!existsSync(dir)) continue;
 		for (const entry of readdirSync(dir).filter((file) => file.endsWith(".md")).sort()) {
-			const agent = parseAgentFile(join(dir, entry), scope);
+			const file = join(dir, entry);
+			if (!isTrustedFile(file, dir, scope, projectDir)) continue;
+			const agent = parseAgentFile(file, scope);
 			if (agent && !agents.has(agent.name)) agents.set(agent.name, agent);
 		}
 	}
 	return [...agents.values()];
-}
-
-export function findAgent(projectDir: string, name: string): AgentDefinition | undefined {
-	return listAgents(projectDir).find((agent) => agent.name === name);
 }

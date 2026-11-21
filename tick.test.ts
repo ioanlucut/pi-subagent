@@ -9,7 +9,7 @@ import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
 import { claimSuspendedRun } from "./queue.ts";
 import { settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
-import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, suspendSessionRuns, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, saveFirstPrompt, suspendSessionRuns, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -82,17 +82,29 @@ function queuedRun(handle: string): RunMetadata {
 
 const started = () => tmuxCalls().filter((call) => call.startsWith("new-session")).map((call) => call.split(" ")[3]);
 
-/** A parent's tick that records what it shows and what it sends. */
-function parentTick(ready = () => true) {
+/**
+ * A parent's tick that records what it shows and what it sends. Each sent result reaches the session, as in
+ * an idle Pi, unless `reaches` says no; `delivered` holds the results the session has.
+ */
+function parentTick(ready = () => true, { reaches = () => true, delivered = new Set<string>() } = {}) {
 	const shown: { handle: string; state: RunState }[][] = [];
 	const sent: string[] = [];
+	const sentResults: string[] = [];
 	const tick = new SessionTick({
 		sessionId: () => "parent",
 		show: (rows) => shown.push(rows.map(({ run, state }) => ({ handle: run.handle, state }))),
-		deliver: { ready, send: (text) => sent.push(text) },
+		deliver: {
+			ready,
+			send: (text, results) => {
+				sent.push(text);
+				sentResults.push(...results);
+				if (reaches()) for (const result of results) delivered.add(result);
+			},
+			delivered: () => delivered,
+		},
 	});
 	ticks.push(tick);
-	return { tick, shown, sent };
+	return { tick, shown, sent, sentResults };
 }
 
 async function kill(child: ChildProcess): Promise<void> {
@@ -183,6 +195,73 @@ test("a result that cannot be sent yet keeps the tick until it is sent", async (
 	assert.equal(shown.length, count);
 });
 
+test("a result taken while the parent is busy is not sent; it is sent once when the parent is idle", () => {
+	let idle = false;
+	const { tick, sent } = parentTick(() => idle);
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	tick.wake();
+
+	mock.timers.tick(3000);
+	assert.deepEqual(sent, [], "a busy Pi would hold it in memory, where Escape or a quit drops it");
+	assert.equal(readdirSync(join(run.runDir, "outbox")).length, 1, "it stays on disk");
+
+	idle = true;
+	mock.timers.tick(5000);
+	assert.deepEqual(sent, ["Subagent aaa111 finished\n\nthe answer"]);
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
+});
+
+/** Move the send time of each result of the run back, as fake timers do not move the clock files use. */
+function setMtime(run: RunMetadata, ms: number): void {
+	const dir = join(run.runDir, "outbox");
+	for (const file of readdirSync(dir)) utimesSync(join(dir, file), new Date(ms), new Date(ms));
+}
+
+test("a sent result that never reaches the session is sent again; one that reached it is never sent twice", () => {
+	let reaches = false;
+	const delivered = new Set<string>();
+	const { tick, sent } = parentTick(() => true, { reaches: () => reaches, delivered });
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	tick.wake();
+	assert.equal(sent.length, 1);
+
+	// The turn it started was cut, or Pi rejected it: the session has no such message.
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 1, "not at once: the message may be on its way");
+	setMtime(run, Date.now() - 5000);
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 2, "sent again on the next idle tick");
+	assert.equal(sent[1], sent[0]);
+
+	reaches = true;
+	setMtime(run, Date.now() - 5000);
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 3);
+	mock.timers.tick(5000);
+	assert.equal(sent.length, 3, "in the session: not sent again");
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
+});
+
+test("a result in the session that the parent quit before it could delete is not sent again after resume", () => {
+	const first = parentTick(() => true, { reaches: () => false });
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	first.tick.wake();
+	assert.equal(first.sent.length, 1);
+	// The message reaches the session after the tick; the parent quits before the next tick.
+	first.tick.stop();
+	assert.equal(readdirSync(join(run.runDir, "outbox")).length, 1);
+
+	// The resumed Pi finds the message in its session.
+	const second = parentTick(() => true, { delivered: new Set(first.sentResults) });
+	second.tick.wake();
+	mock.timers.tick(3000);
+	assert.deepEqual(second.sent, []);
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
+});
+
 test("a result of an exited child that the parent quit before sending arrives once after resume", async () => {
 	const { run, child } = liveRun("aaa111", { state: "idle" });
 	writeResult(run, "finished", "the answer");
@@ -199,6 +278,28 @@ test("a result of an exited child that the parent quit before sending arrives on
 	assert.match(sent[0], /^Subagent aaa111 finished\n\nthe answer\n\n---\n\nSubagent aaa111 exited\n/);
 	await suspendSessionRuns("parent");
 	assert.equal(existsSync(run.runDir), false, "the next quit removes the run, as it has nothing left to send");
+});
+
+test("two parents of one session: a result reaches only the owner's chat, once", () => {
+	// The owner: another live Pi. This process is a second Pi on the same session.
+	const owner = spawn("sleep", ["60"], { stdio: "ignore" });
+	children.push(owner);
+	const { run } = liveRun("aaa111", { state: "idle", parentPid: owner.pid });
+	writeResult(run, "finished", "the answer");
+	const second = parentTick();
+	second.tick.wake();
+	mock.timers.tick(3000);
+	assert.deepEqual(second.sent, [], "the second Pi shows the run but does not send its result");
+	assert.deepEqual(second.shown.at(-1), [{ handle: "aaa111", state: "idle" }]);
+
+	// The owner's tick, here with this process's ID.
+	updateMetadata(run.runDir, { parentPid: process.pid });
+	const first = parentTick();
+	first.tick.wake();
+	mock.timers.tick(3000);
+	assert.equal(first.sent.length, 1);
+	assert.match(first.sent[0], /^Subagent aaa111 finished\n\nthe answer/);
+	assert.deepEqual(second.sent, []);
 });
 
 test("a result held by a cancelled wait keeps the tick, and arrives when the wait's claim expires", async () => {
@@ -317,6 +418,137 @@ test("a resumed child that never reports in is stopped at its deadline and repor
 	assert.deepEqual(tmuxCalls().slice(1), ["kill-session -t pi-subagent-aaa111"]);
 	assert.equal(sent.length, 1);
 	assert.match(sent[0], /^Subagent aaa111 timed out\n/);
+});
+
+test("a child with --timeout 10s that never starts its first turn is stopped at its deadline and reported timed out", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	// Pi reports `idle` at its session start; its first prompt never became a turn.
+	const now = new Date().toISOString();
+	liveRun("aaa111", { state: "idle", hasStarted: false, sessionStartedAt: now, timeout: "10s", deadline: new Date(Date.now() + 10_000).toISOString() });
+
+	tick.wake();
+	mock.timers.tick(9000);
+	await settleTmuxCalls();
+	assert.deepEqual(tmuxCalls(), []);
+
+	mock.timers.tick(2000);
+	await settleTmuxCalls();
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^Subagent aaa111 timed out\n/);
+});
+
+test("a child past its start grace that has not recorded its process ID is still ended at its deadline, with no second message", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	// Its Pi runs in tmux, but has not come to record its ID: only tmux knows it is there.
+	const { child } = liveRun("aaa111", { state: "starting", childPid: null, timeout: "40s", deadline: new Date(Date.now() + 40_000).toISOString() });
+	child.kill("SIGKILL");
+
+	tick.wake();
+	mock.timers.tick(31_000);
+	await settleTmuxCalls();
+	assert.match(sent.join(), /^Subagent aaa111 exited\n/, "reported at the end of its grace time, as before");
+	assert.deepEqual(tmuxCalls(), []);
+
+	mock.timers.tick(10_000);
+	await settleTmuxCalls();
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+	assert.equal(sent.length, 1, "no second message");
+});
+
+/** A fake `tmux` whose `capture-pane` prints `screen`; it records each call, and `new-session` succeeds. */
+function screenTmux(screen: string): void {
+	writeFileSync(join(root, "screen"), screen);
+	writeFileSync(
+		join(root, "bin", "tmux"),
+		`#!/bin/sh\necho "$*" >> "${join(root, "tmux-calls")}"\n[ "$1" = capture-pane ] && cat "${join(root, "screen")}"\nexit 0\n`,
+	);
+}
+
+// The screen of a real child Pi whose provider has no login, from `tmux capture-pane -p -J` (paths shortened).
+const NO_LOGIN_SCREEN = `[Extensions]
+  code
+
+
+ Error: No API key found for anthropic.
+
+ Use /login to log into a provider via OAuth or API key. See:
+
+ /pi/docs/providers.md
+
+ /pi/docs/models.md
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add \`set -g extended-keys on\` to ~/.tmux.conf and restart tmux.
+
+────────────────────────────────────────
+
+────────────────────────────────────────
+/private/tmp/project (main) • subagent nologin
+0.0%/200k (auto)                    claude-opus-4-5 • thinking off
+`;
+
+test("a child idle before its first turn 15 s after its session started is stopped, reported failed to start with Pi's error, and frees its slot", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	screenTmux(NO_LOGIN_SCREEN);
+	const { tick, shown, sent } = parentTick();
+	const { run } = liveRun("aaa111", { state: "idle", hasStarted: false, sessionStartedAt: new Date().toISOString() });
+	saveFirstPrompt(run.runDir, ["Task:\nSay hi."]);
+	queuedRun("bbb222");
+
+	tick.wake();
+	mock.timers.tick(14_000);
+	await settleTmuxCalls();
+	assert.deepEqual(tmuxCalls(), [], "not before 15 s");
+
+	mock.timers.tick(1000);
+	await settleTmuxCalls();
+	mock.timers.tick(1000);
+	await settleTmuxCalls();
+	mock.timers.tick(1000);
+
+	assert.deepEqual(sent, [
+		"Subagent aaa111 failed to start\n\nIts Pi did not start its first prompt within 15 s, so it was stopped. Its screen ended with:\n" +
+			"Error: No API key found for anthropic.\nUse /login to log into a provider via OAuth or API key. See:\n/pi/docs/providers.md\n/pi/docs/models.md",
+	]);
+	assert.deepEqual(tmuxCalls().slice(0, 2), ["capture-pane -p -J -t pi-subagent-aaa111", "kill-session -t pi-subagent-aaa111"]);
+	assert.deepEqual(started(), ["pi-subagent-bbb222"], "its slot went to the queued child");
+	assert.equal(readMetadata(run.runDir)?.state, "error");
+	assert.deepEqual(shown.at(-1), [{ handle: "bbb222", state: "starting" }]);
+});
+
+test("a child whose Pi asks whether to trust the project is reported as waiting for trust, not exited, and keeps its slot", async () => {
+	const { run } = liveRun("aaa111", { state: "starting", childPid: null });
+	children.pop()?.kill("SIGKILL");
+	// The child Pi, at its trust prompt: its session has not started.
+	const trusting = spawn(
+		process.execPath,
+		["--input-type=module", "-e", `import { recordTrustPrompt } from ${JSON.stringify(join(import.meta.dirname, "shared.ts"))}; recordTrustPrompt(${JSON.stringify(run.runDir)}, "/work/fresh"); setInterval(() => {}, 1000);`],
+		{ stdio: "ignore" },
+	);
+	children.push(trusting);
+	while (typeof readMetadata(run.runDir)?.childPid !== "number") await new Promise((resolve) => setTimeout(resolve, 20));
+	queuedRun("bbb222");
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() + 31_000 });
+	const { tick, shown, sent } = parentTick();
+
+	tick.wake();
+	mock.timers.tick(5000);
+	await settleTmuxCalls();
+
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^Subagent aaa111 waits for project trust in \/work\/fresh\n\n.*tmux attach -t pi-subagent-aaa111/);
+	assert.deepEqual(shown.at(-1), [
+		{ handle: "aaa111", state: "starting" },
+		{ handle: "bbb222", state: "queued" },
+	]);
+	assert.deepEqual(started(), [], "it keeps its slot past its start grace");
+	assert.deepEqual(tmuxCalls(), []);
 });
 
 test("a queued child keeps the tick, and starts when the last live child ends", async () => {
@@ -467,7 +699,7 @@ test("with a slow tmux, a queued child that fails to start is reported once, aft
 	const tick = new SessionTick({
 		sessionId: () => "parent",
 		show: (rows) => shown.push(rows.map(({ run, state }) => ({ handle: run.handle, state }))),
-		deliver: { ready: () => true, send: (text) => sent.push(text) },
+		deliver: { ready: () => true, send: (text) => sent.push(text), delivered: () => new Set() },
 		onStartError: (_run, message) => errors.push(message),
 	});
 	ticks.push(tick);

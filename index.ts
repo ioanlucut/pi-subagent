@@ -17,6 +17,7 @@ import {
 	nextDeadline,
 	pruneStaleRuns,
 	readMetadata,
+	recordTrustPrompt,
 	runDisplayName,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
@@ -32,6 +33,17 @@ import { SubagentToolSchema } from "./tool-schema.ts";
 import { ActivityTracker, widgetLines } from "./widget.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
+
+/** The names of the results in the session's `subagent-result` messages, on every branch. */
+function deliveredResults(ctx: ExtensionContext): Set<string> {
+	const names = new Set<string>();
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type !== "custom_message" || entry.customType !== "subagent-result") continue;
+		const results = (entry.details as { results?: unknown } | undefined)?.results;
+		if (Array.isArray(results)) for (const name of results) names.add(String(name));
+	}
+	return names;
+}
 
 function displayState(metadata: RunMetadata): string {
 	return effectiveRunState(metadata).padEnd(8);
@@ -191,14 +203,16 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				show: ctx.hasUI ? (rows) => showRows(ctx, rows) : undefined,
 				deliver: delivers
 					? {
-							// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
-							ready: () => ctx.isIdle() || ctx.signal !== undefined,
-							// Idle: starts a turn. Busy: waits until the current work is done.
-							send: (text) =>
+							// Only idle: a busy Pi holds the message in memory, where Escape or a quit drops it.
+							ready: () => ctx.isIdle(),
+							// Starts a turn, which puts the message in the session with the names of its results. A turn the
+							// user started since `ready` gets it as a follow-up; one dropped from there is sent again.
+							send: (text, results) =>
 								pi.sendMessage(
-									{ customType: "subagent-result", content: text, display: true },
+									{ customType: "subagent-result", content: text, display: true, details: { results } },
 									{ triggerTurn: true, deliverAs: "followUp" },
 								),
+							delivered: () => deliveredResults(ctx),
 						}
 					: undefined,
 				onStartError: (run, message) => {
@@ -250,6 +264,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 	});
 
+	// Pi fires this before it asks whether to trust the project folder. The user decides, so the answer is left to
+	// Pi; the parent learns that the child waits. A decision Pi finds saved starts the session at once, and clears it.
+	pi.on("project_trust", (event, ctx) => {
+		if (ctx.hasUI) recordTrustPrompt(runDir, event.cwd);
+		return { trusted: "undecided" };
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		currentContext = ctx;
 		const metadata = readMetadata(runDir);
@@ -259,6 +280,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		updateMetadata(runDir, {
 			childSessionId: ctx.sessionManager.getSessionId(),
 			childPid: process.pid,
+			sessionStartedAt: new Date().toISOString(),
+			promptAccepted: undefined,
+			waitsForTrust: undefined,
+			trustReported: undefined,
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: ctx.isIdle() ? "idle" : "busy",
 			suspended: undefined,
@@ -270,6 +295,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			timer.unref();
 		}
 		processInbox();
+	});
+
+	// Pi checks the model and its login before this; MCP servers can then hold the turn's start for 10 s.
+	pi.on("before_agent_start", () => {
+		updateMetadata(runDir, (metadata) => (metadata.hasStarted || metadata.promptAccepted ? undefined : { promptAccepted: true }));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {
