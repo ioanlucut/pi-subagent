@@ -23,6 +23,7 @@ import {
 	readMetadata,
 	removeRunDir,
 	runDisplayName,
+	saveFirstPrompt,
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
@@ -364,6 +365,7 @@ function spawnSubagent(callerArgs: string[]): void {
 	try {
 		// The launch first: from the metadata write on, a parent tick can start a queued run.
 		prepareLaunch(metadata, initialArgs);
+		saveFirstPrompt(runDir, initialArgs);
 		queued = writeNewRun(metadata);
 		metadata.state = queued ? "queued" : "starting";
 		if (!queued) startRun(metadata);

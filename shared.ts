@@ -58,6 +58,12 @@ export interface RunMetadata {
 	suspended?: boolean;
 	/** When the parent suspended the child; resume leaves a child suspended longer than a day. */
 	suspendedAt?: string;
+	/**
+	 * The work the suspend cut, set under the run lock at suspend: `first-prompt` when the child had not saved its
+	 * first prompt, `continue` when it was in a turn. Resume launches it with that work, so it ends a turn and the
+	 * parent gets a result; with none it resumes idle.
+	 */
+	cutWork?: "first-prompt" | "continue";
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -353,6 +359,36 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 	);
 }
 
+const firstPromptPath = (runDir: string): string => join(runDir, "first-prompt.json");
+
+/**
+ * Keep the first-prompt arguments of a run (agent body, prompts, `@file` attachments). The launcher deletes
+ * `launch.json` with the caller's environment on start, so this is the only copy of the task until the child
+ * saves it to its transcript; a quit before that resumes the child with it.
+ */
+export function saveFirstPrompt(runDir: string, initialArgs: string[]): void {
+	writeFileSync(firstPromptPath(runDir), JSON.stringify(initialArgs), { encoding: "utf8", mode: 0o600 });
+}
+
+/** The child calls this when a turn ends: its transcript now holds the first prompt. */
+export function dropFirstPrompt(runDir: string): void {
+	rmSync(firstPromptPath(runDir), { force: true });
+}
+
+export const CONTINUE_MESSAGE = "Your previous turn was stopped because the parent Pi quit. Continue the task where you stopped, then give your answer.";
+
+/** The prompt a suspended run is relaunched with: the work its suspend cut, or none, so it resumes idle. */
+export function resumeArgs(run: RunMetadata): string[] {
+	if (run.cutWork === "continue") return [CONTINUE_MESSAGE];
+	if (run.cutWork !== "first-prompt") return [];
+	try {
+		return JSON.parse(readFileSync(firstPromptPath(run.runDir), "utf8")) as string[];
+	} catch {
+		// A run of an older version kept no first prompt.
+		return [];
+	}
+}
+
 /** When the time limit of a run that starts work now ends; undefined for a run with no limit. */
 export function nextDeadline(metadata: RunMetadata): string | undefined {
 	const limit = metadata.timeout === undefined ? undefined : parseDuration(metadata.timeout);
@@ -563,6 +599,7 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 			updateMetadata(run.runDir, (current) => ({
 				suspended: true,
 				suspendedAt: new Date().toISOString(),
+				cutWork: cutWork(current),
 				...(current.childPid === null && { state: "exited" as const }),
 			})),
 		);
@@ -571,6 +608,31 @@ export async function suspendRuns(runs: RunMetadata[]): Promise<void> {
 	}
 	// Wait for all at once: the parent can be killed while it waits, and every child must be stopped first.
 	await Promise.all([...stopped, ...runs.map((run) => waitForRunShutdown(run.runDir))]);
+}
+
+/**
+ * What a suspend now cuts. A child that has not begun the turn of its launch (the child clears `cutWork` on
+ * `agent_start`) keeps that launch's work: Pi reports `idle` at its session start, before its first prompt runs.
+ */
+function cutWork(run: RunMetadata): RunMetadata["cutWork"] {
+	if (!run.hasStarted) return "first-prompt";
+	if (run.state === "busy") return hasUserMessage(run.sessionFile) ? "continue" : "first-prompt";
+	return run.cutWork;
+}
+
+/** Whether the transcript has a user message: Pi writes the first prompt after `agent_start` sets `hasStarted`. */
+function hasUserMessage(sessionFile: string): boolean {
+	try {
+		return readFileSync(sessionFile, "utf8").split("\n").some((line) => {
+			try {
+				return (JSON.parse(line) as { message?: { role?: unknown } }).message?.role === "user";
+			} catch {
+				return false;
+			}
+		});
+	} catch {
+		return false;
+	}
 }
 
 /**

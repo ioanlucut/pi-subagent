@@ -17,7 +17,7 @@ Each subagent is a full Pi in its own tmux session, with its own JSONL transcrip
 | **Roles** | Agent files in `~/.pi/agent/agents/` or a project's `.pi/agents/` hold a role's model, thinking level, tools, extensions, and instructions: `spawn --agent implementer`. A project agent file cannot load code. |
 | **Light children** | `--extensions <list>` loads only the listed extensions; `--no-mcp` starts no MCP servers. The command guard `cc-safety-net` stays in each light child. |
 | **Worktrees** | `--worktree <topic> --base <branch>` gives a child its own Git worktree and branch under `~/WORK/dev/.worktrees/<repo>/<topic>`, so parallel implementers do not conflict. |
-| **Lifecycle** | Quitting the parent suspends its children; resuming the parent session starts them again with their full history. A parent that dies leaves no running children: the next Pi suspends them. Transcripts stay after `stop`, and `pi --resume` can continue them. |
+| **Lifecycle** | Quitting the parent suspends its children; resuming the parent session starts them again with their full history, and a child cut mid-task continues it and reports its result. A parent that dies leaves no running children: the next Pi suspends them. Transcripts stay after `stop`, and `pi --resume` can continue them. |
 | **Fast parent** | The parent checks its children with no program start, and only while it has children. A session with no children does no subagent work. On a busy machine this was the difference between a frozen Pi and a responsive one. |
 | **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. |
 | **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. |
@@ -289,7 +289,7 @@ If the branch exists already, for example an integration branch for a merger, `-
 | `/reload` in the parent                                                | Nothing. Children keep running.                                                                                                         |
 | The parent quits or switches session                                   | Running and queued children are suspended: the process stops, transcript and metadata stay. Children that already exited on their own are removed, except one with a result not sent yet: it stays until the resumed session sends it. A child whose lock a stalled process holds is still stopped, and reported once; the others are suspended. |
 | The parent dies without quitting                                       | The next Pi to start, in any session, suspends them.                                                                                    |
-| The parent session starts again (`pi --resume`, `pi --session <file>`) | Children suspended in the last 24 h start again through the queue, idle, with their full history. Older ones stay suspended until `subagent resume`. |
+| The parent session starts again (`pi --resume`, `pi --session <file>`) | Children suspended in the last 24 h start again through the queue, with their full history. A child that was idle at the quit starts idle. A child that was working ends a turn, so the parent gets its result as usual: one cut mid-turn gets `Your previous turn was stopped because the parent Pi quit. Continue the task where you stopped, then give your answer.`; one that had not saved its first prompt gets that prompt again, as `spawn` gave it. Older ones stay suspended until `subagent resume`, which does the same. |
 | `subagent stop`                                                        | Removed: tmux session and metadata. A transcript with an answer is copied first, see below.                                             |
 | A Pi starts, in any session                                            | Children with no running process and no change for 14 days are removed. A child tmux session whose run directory is gone is ended.     |
 
@@ -304,6 +304,7 @@ parent Pi ── tool or bash: subagent spawn ──►   ~/.pi/agent/subagents/
    │                                            metadata.json   state, model, parent
    │                                            metadata.lock   while a process changes metadata.json
    │                                            launch.json     the caller's environment, until tmux starts the child
+   │                                            first-prompt.json  the first prompt, for a resume before the child saved it
    │                                            alive           FIFO the child holds open while it runs
    │                                            session.jsonl   the child's transcript
    │                                            inbox/          messages from `send`
