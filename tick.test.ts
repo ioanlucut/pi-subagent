@@ -262,6 +262,27 @@ test("a result in the session that the parent quit before it could delete is not
 	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
 });
 
+test("a session resumed long after the quit drops the sent results it has and sends the others once", () => {
+	const first = parentTick(() => true, { reaches: () => false });
+	const { run: inSession } = liveRun("aaa111", { state: "idle" });
+	const { run: lost } = liveRun("bbb222", { state: "idle" });
+	writeResult(inSession, "finished", "the answer");
+	writeResult(lost, "finished", "the other answer");
+	first.tick.wake();
+	assert.equal(first.sent.length, 1);
+	first.tick.stop();
+	// Pi is opened again the next day: both sends are old. Only the first reached the session.
+	setMtime(inSession, Date.now() - 86_400_000);
+	setMtime(lost, Date.now() - 86_400_000);
+
+	const second = parentTick(() => true, { delivered: new Set(first.sentResults.filter((result) => result.startsWith("aaa111/"))) });
+	second.tick.wake();
+	assert.deepEqual(readdirSync(join(inSession.runDir, "outbox")), [], "in the session: deleted at session start");
+	mock.timers.tick(3000);
+	assert.deepEqual(second.sent, ["Subagent bbb222 finished\n\nthe other answer"], "only the missing result, once");
+	assert.deepEqual(readdirSync(join(lost.runDir, "outbox")), []);
+});
+
 test("a result of an exited child that the parent quit before sending arrives once after resume", async () => {
 	const { run, child } = liveRun("aaa111", { state: "idle" });
 	writeResult(run, "finished", "the answer");
