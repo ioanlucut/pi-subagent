@@ -759,17 +759,18 @@ function endSessionsWithoutRun(): void {
 /**
  * Whether this Pi is the run's parent: the Pi that owns it, or any Pi of its session when its owner is gone.
  * `exact: false` starts no program, for the tick: an owner whose process ID was reused still counts as live.
+ * `startTime` reads the start time of a live owner's process.
  */
-export function actsAsParent(run: RunMetadata, { exact = true } = {}): boolean {
+export function actsAsParent(run: RunMetadata, { exact = true, startTime = processStartTime } = {}): boolean {
 	if (run.parentPid === undefined || run.parentPid === process.pid) return true;
-	return exact ? parentIsGone(run) : !processExists(run.parentPid);
+	return exact ? parentIsGone(run, startTime) : !processExists(run.parentPid);
 }
 
-function parentIsGone(run: RunMetadata): boolean {
+function parentIsGone(run: RunMetadata, startTime = processStartTime): boolean {
 	if (run.parentPid === undefined) return false;
 	if (!processExists(run.parentPid)) return true;
 	// Same process ID, other start time: the ID now belongs to another process. Unknown start time: keep the child.
-	const started = processStartTime(run.parentPid);
+	const started = startTime(run.parentPid);
 	return started !== undefined && run.parentStarted !== undefined && started !== run.parentStarted;
 }
 

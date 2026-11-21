@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
+	actsAsParent,
 	effectiveRunState,
 	getAgentDir,
 	inStartingGrace,
@@ -12,6 +13,7 @@ import {
 	nextDeadline,
 	ownStartTime,
 	prepareLaunch,
+	processStartTime,
 	readMetadata,
 	removeRunDir,
 	resumeArgs,
@@ -200,9 +202,11 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	// No queued run: no liveness check, so the tick costs only the listing.
 	const sessionId = runs.find((run) => run.state === "queued")?.parentSessionId;
 	if (sessionId === undefined) return runs;
+	// Before the lock, as the check can start `ps`.
+	const mine = new Set(runs.filter((run) => run.state === "queued" && actsAsParent(run, { startTime: ownerStartTime })).map((run) => run.handle));
 	let result: { runs: RunMetadata[]; claimed: Extract<Claim, { claimed: true }>[] };
 	try {
-		result = countedUnderLock(sessionId, runs, (sessionExists) => claimQueuedRuns(listRuns(sessionId), sessionExists));
+		result = countedUnderLock(sessionId, runs, (sessionExists) => claimQueuedRuns(listRuns(sessionId), sessionExists, mine));
 	} catch (error) {
 		// The session lock is held, by a stalled process: nothing changed, the next tick tries again.
 		if (error instanceof LockBusyError) return runs;
@@ -227,17 +231,39 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	return result.runs;
 }
 
-/** Under the session lock: claim the queued ones of `runs` while a slot is free. Starts no program. */
-function claimQueuedRuns(runs: RunMetadata[], sessionExists: (session: string) => boolean) {
+const OWNER_START_TTL_MS = 60 * 1000;
+
+/**
+ * Start times of other Pi this Pi has read, each kept a minute: an observer's tick starts no `ps` each
+ * second for the live owner it waits on, and still sees within a minute that a new process took its ID.
+ */
+const ownerStarts = new Map<number, { started: string | undefined; readAt: number }>();
+
+function ownerStartTime(pid: number): string | undefined {
+	const known = ownerStarts.get(pid);
+	if (known && Date.now() - known.readAt < OWNER_START_TTL_MS) return known.started;
+	const started = processStartTime(pid);
+	ownerStarts.set(pid, { started, readAt: Date.now() });
+	return started;
+}
+
+/**
+ * Under the session lock: claim the queued ones of `runs` in `mine` while a slot is free. Starts no program.
+ *
+ * `mine` are the handles this Pi owns, or whose owner is gone. Another live Pi of the session (`pi --session`
+ * in a second terminal) starts its own queued runs, gets their results, and suspends them when it quits. A
+ * run that appears after the check is not in `mine`: a later tick checks it.
+ */
+function claimQueuedRuns(runs: RunMetadata[], sessionExists: (session: string) => boolean, mine: ReadonlySet<string>) {
 	let free = runLimit() - liveRunCount(runs, sessionExists);
 	const claimed: Extract<Claim, { claimed: true }>[] = [];
 	const after = runs.flatMap((run) => {
-		if (free <= 0 || run.state !== "queued") return [run];
+		if (free <= 0 || run.state !== "queued" || !mine.has(run.handle)) return [run];
 		// Its `spawn` or `resume` has not saved the launch yet: tmux would start nothing. A later tick starts it.
 		if (!existsSync(join(run.runDir, "launch.json"))) return [run];
 		let claim: Claim;
 		try {
-			// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
+			// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep and gets its result.
 			claim = claimRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
 		} catch (error) {
 			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
