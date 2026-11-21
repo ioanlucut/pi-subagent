@@ -1,6 +1,5 @@
-import { rmSync } from "node:fs";
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
-import { hasResults, isExitKnown, reportExitedRuns, returnResults, takeResults } from "./outbox.ts";
+import { forgetDeliveredResults, hasResults, isExitKnown, reportExitedRuns, takeResultsToSend } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
@@ -8,8 +7,12 @@ export interface SessionTickOptions {
 	sessionId: () => string;
 	/** Show the session's children that have not exited: the widget rows and the Herdr panes. */
 	show?: (rows: { run: RunMetadata; state: RunState }[]) => void;
-	/** Put the children's results into the chat. `ready` is false when Pi would reject a message now. */
-	deliver?: { ready: () => boolean; send: (text: string) => void };
+	/**
+	 * Put the children's results into the chat. `ready`: Pi is idle, so `send` starts a turn with the message,
+	 * not a queued follow-up that Escape or a quit drops. `send` gets the names of its results, and `delivered`
+	 * gives the names of the results in the session; a result stays on disk until it is there.
+	 */
+	deliver?: { ready: () => boolean; send: (text: string, results: string[]) => void; delivered: () => ReadonlySet<string> };
 	/** A queued child that could not start. */
 	onStartError?: (run: RunMetadata, message: string) => void;
 }
@@ -57,19 +60,16 @@ export class SessionTick {
 			.filter(({ run, state }) => state !== "exited" && !(state === "error" && isExitKnown(run.runDir)));
 		show?.(rows);
 		if (!deliver) return rows.length > 0;
-		// Results that wait for Pi keep the tick until they are sent.
-		if (!deliver.ready()) return runs.length > 0;
-		const inGrace = reportExitedRuns(runs);
-		const taken = takeResults(runs);
-		if (taken) {
-			try {
-				deliver.send(taken.text);
-			} catch (error) {
-				returnResults(taken.files);
-				throw error;
-			}
-			for (const file of taken.files) rmSync(file, { force: true });
+		const ready = deliver.ready();
+		let inGrace = false;
+		if (ready) {
+			inGrace = reportExitedRuns(runs);
+			const results = takeResultsToSend(runs);
+			if (results) deliver.send(results.text, results.results);
 		}
+		forgetDeliveredResults(runs, deliver.delivered);
+		// Results that wait for Pi keep the tick until they are in the session.
+		if (!ready) return runs.length > 0;
 		return rows.length > 0 || inGrace || hasResults(runs);
 	}
 }

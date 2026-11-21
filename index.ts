@@ -33,6 +33,17 @@ import { ActivityTracker, widgetLines } from "./widget.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
 
+/** The names of the results in the session's `subagent-result` messages, on every branch. */
+function deliveredResults(ctx: ExtensionContext): Set<string> {
+	const names = new Set<string>();
+	for (const entry of ctx.sessionManager.getEntries()) {
+		if (entry.type !== "custom_message" || entry.customType !== "subagent-result") continue;
+		const results = (entry.details as { results?: unknown } | undefined)?.results;
+		if (Array.isArray(results)) for (const name of results) names.add(String(name));
+	}
+	return names;
+}
+
 function displayState(metadata: RunMetadata): string {
 	return effectiveRunState(metadata).padEnd(8);
 }
@@ -191,14 +202,16 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				show: ctx.hasUI ? (rows) => showRows(ctx, rows) : undefined,
 				deliver: delivers
 					? {
-							// Compaction: not idle, and no run to queue behind. Pi would reject the message; try again next tick.
-							ready: () => ctx.isIdle() || ctx.signal !== undefined,
-							// Idle: starts a turn. Busy: waits until the current work is done.
-							send: (text) =>
+							// Only idle: a busy Pi holds the message in memory, where Escape or a quit drops it.
+							ready: () => ctx.isIdle(),
+							// Starts a turn, which puts the message in the session with the names of its results. A turn the
+							// user started since `ready` gets it as a follow-up; one dropped from there is sent again.
+							send: (text, results) =>
 								pi.sendMessage(
-									{ customType: "subagent-result", content: text, display: true },
+									{ customType: "subagent-result", content: text, display: true, details: { results } },
 									{ triggerTurn: true, deliverAs: "followUp" },
 								),
+							delivered: () => deliveredResults(ctx),
 						}
 					: undefined,
 				onStartError: (run, message) => {
