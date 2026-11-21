@@ -1,7 +1,7 @@
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { forgetDeliveredResults, hasResults, isExitKnown, reportExitedRuns, takeResultsToSend } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
-import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { actsAsParent, effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;
@@ -61,15 +61,17 @@ export class SessionTick {
 		show?.(rows);
 		if (!deliver) return rows.length > 0;
 		const ready = deliver.ready();
+		// Another Pi on the session shows its runs, but only the run's owner sends their results.
+		const owned = runs.filter((run) => actsAsParent(run, { exact: false }));
 		let inGrace = false;
 		if (ready) {
-			inGrace = reportExitedRuns(runs);
-			const results = takeResultsToSend(runs);
+			inGrace = reportExitedRuns(owned);
+			const results = takeResultsToSend(owned);
 			if (results) deliver.send(results.text, results.results);
 		}
-		forgetDeliveredResults(runs, deliver.delivered);
+		forgetDeliveredResults(owned, deliver.delivered);
 		// Results that wait for Pi keep the tick until they are in the session.
 		if (!ready) return runs.length > 0;
-		return rows.length > 0 || inGrace || hasResults(runs);
+		return rows.length > 0 || inGrace || hasResults(owned);
 	}
 }

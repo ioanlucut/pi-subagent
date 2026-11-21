@@ -9,6 +9,7 @@ import {
 	readFileSync,
 	realpathSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,6 +54,10 @@ beforeEach(() => {
 	delete process.env.PI_SUBAGENT_NOTIFY;
 	delete process.env.PI_SUBAGENT_QUEUE;
 	delete process.env.PI_SUBAGENT_LIMIT;
+	// Set when the tests run from a Pi: a run would name that Pi as its owner, and a quit here would not suspend it.
+	delete process.env.PI_SUBAGENT_PARENT_PID;
+	delete process.env.PI_SUBAGENT_PARENT_STARTED;
+	delete process.env.PI_SUBAGENT_ALLOW_UNGUARDED;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
@@ -334,6 +339,38 @@ function endTurn(run: RunMetadata, answer: string): string[] {
 	reportSettledTurn(run.runDir);
 	return readdirSync(join(run.runDir, "outbox")).map((file) => readFileSync(join(run.runDir, "outbox", file), "utf8"));
 }
+
+test("two parents of one session: the second quits, and only its own child is suspended", async () => {
+	// The first parent: another Pi that still runs. The second: this process, which quits.
+	const first = spawn("sleep", ["60"], { stdio: "ignore" });
+	try {
+		spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(first.pid), PI_SUBAGENT_PARENT_STARTED: processStartTime(first.pid!) });
+		spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(process.pid), PI_SUBAGENT_PARENT_STARTED: processStartTime(process.pid) });
+		const other = listRuns().find((run) => run.parentPid === first.pid)!;
+		const own = listRuns().find((run) => run.parentPid === process.pid)!;
+		await Promise.all([other, own].map(startedChild));
+
+		await suspendSessionRuns("parent");
+
+		assert.equal(tmuxSessionExists(own.tmuxSession), false);
+		assert.equal(readMetadata(own.runDir)?.suspended, true);
+		assert.equal(tmuxSessionExists(other.tmuxSession), true, "the first parent's child still works");
+		assert.equal(readMetadata(other.runDir)?.suspended, undefined);
+	} finally {
+		first.kill("SIGKILL");
+	}
+});
+
+test("a quit suspends a run of its session whose owner died, as before", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(deadPid()) });
+	const [run] = listRuns();
+	await startedChild(run);
+
+	await suspendSessionRuns("parent");
+
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(readMetadata(run.runDir)?.suspended, true);
+});
 
 test("a child busy at quit is resumed with the continue message, and the parent gets one result for it", async () => {
 	spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_NOTIFY: "1" }, ["--timeout", "1h"]);
@@ -746,15 +783,37 @@ test("spawn --extensions loads only the listed extensions, this extension, and t
 	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts", "npm:b"]);
 });
 
-test("spawn --extensions drops the command guard only when the list names -cc-safety-net", async () => {
+test("the subagent tool refuses -cc-safety-net unless the user set PI_SUBAGENT_ALLOW_UNGUARDED=1, which drops the guard", async () => {
 	installGuard();
-	const result = runCli(
-		["spawn", "--cwd", root, "--extensions", "/ext/a.ts,-cc-safety-net", "--prompt", "hi"],
-		spawnEnv(agentDir(), fakePi(join(root, "bin"))),
-	);
+	const bin = fakePi(join(root, "bin"));
+	const params = { action: "spawn", extensions: "/ext/a.ts,-cc-safety-net", prompt: "hi" } as const;
+	await withEnv(spawnEnv(agentDir(), bin), async () => {
+		const refused = await runSubagentTool(params, toolContext());
+		assert.equal(refused.isError, true);
+		assert.equal(
+			refused.text,
+			"-cc-safety-net drops the command guard; only the user can allow it, with PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn",
+		);
+		assert.equal(existsSync(getRunsDir()), false);
+	});
 
-	assert.equal(result.status, 0, result.stderr);
+	await withEnv({ ...spawnEnv(agentDir(), bin), PI_SUBAGENT_ALLOW_UNGUARDED: "1" }, async () => {
+		const result = await runSubagentTool(params, toolContext());
+		assert.equal(result.isError, false, result.text);
+	});
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
+
+test("the subagent tool with noExtensions starts a child that loads this extension and the command guard", async () => {
+	const guard = installGuard();
+	await withEnv(spawnEnv(agentDir(), fakePi(join(root, "bin"))), async () => {
+		const result = await runSubagentTool({ action: "spawn", noExtensions: true, prompt: "hi" }, toolContext());
+		assert.equal(result.isError, false, result.text);
+	});
+
+	const args = await childArgs(agentDir());
+	assert.ok(args.includes("--no-extensions"));
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard]);
 });
 
 test("spawn --no-mcp starts the child with no MCP servers", async () => {
@@ -1641,6 +1700,20 @@ test("a project agent file cannot load extensions or drop the command guard, and
 	assert.equal(args.includes("--no-extensions"), false);
 	assert.deepEqual(extensionFlags(args), []);
 	assert.equal(flagValue(args, "--tools"), "read");
+});
+
+test("a project agent file that links outside the project is skipped with one warning, and agents does not list it", () => {
+	const project = join(root, "project");
+	agentFile(join(root, "outside"), "secret", ["description: Outside the project"], "Secret body.\n");
+	agentFile(join(project, ".pi", "agents"), "reviewer", ["description: Reviews a change"]);
+	symlinkSync(join(root, "outside", "secret.md"), join(project, ".pi", "agents", "secret.md"));
+	const link = join(realpathSync(project), ".pi", "agents", "secret.md");
+
+	const result = runCliIn(project, ["agents"], { PI_CODING_AGENT_DIR: agentDir() });
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "reviewer  project  Reviews a change\n");
+	assert.equal(result.stderr, `Warning: skipped the project agent file ${link}; it is not a regular file inside the project\n`);
 });
 
 test("agents lists the name, scope, and description of each agent, a project one in place of a global one", () => {
