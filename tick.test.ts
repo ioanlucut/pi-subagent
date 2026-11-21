@@ -9,7 +9,7 @@ import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
 import { claimSuspendedRun } from "./queue.ts";
 import { settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
-import { inboxDir, listRuns, openAliveFifo, prepareLaunch, readMetadata, saveFirstPrompt, suspendSessionRuns, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
+import { inboxDir, listRuns, openAliveFifo, prepareLaunch, processStartTime, readMetadata, saveFirstPrompt, suspendSessionRuns, updateMetadata, writeMetadata, type RunMetadata, type RunState } from "./shared.ts";
 import { SessionTick } from "./tick.ts";
 
 let root: string;
@@ -73,8 +73,8 @@ function liveRun(handle: string, patch: Partial<RunMetadata> = {}): { run: RunMe
 }
 
 /** A run that waits for a free slot, with its launch saved as `spawn` does; it has no process yet. */
-function queuedRun(handle: string): RunMetadata {
-	const { run, child } = liveRun(handle, { state: "queued", childPid: null });
+function queuedRun(handle: string, patch: Partial<RunMetadata> = {}): RunMetadata {
+	const { run, child } = liveRun(handle, { state: "queued", childPid: null, ...patch });
 	child.kill("SIGKILL");
 	prepareLaunch(run);
 	return run;
@@ -612,6 +612,41 @@ test("two ticks that both list one queued run start it once, and the run stays l
 	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
 	assert.deepEqual(errors, []);
 	assert.equal(readMetadata(run.runDir)?.state, "starting");
+});
+
+test("two parents of one session, the owner alive: the other's tick does not start the owner's queued run", async () => {
+	// The owner: another live Pi. This process is a second Pi on the same session.
+	const owner = spawn("sleep", ["60"], { stdio: "ignore" });
+	children.push(owner);
+	const run = queuedRun("bbb222", { parentPid: owner.pid, parentStarted: processStartTime(owner.pid!) });
+	const { tick, shown } = parentTick();
+
+	tick.wake();
+	mock.timers.tick(3000);
+	await settleTmuxCalls();
+
+	assert.deepEqual(started(), []);
+	assert.deepEqual(shown.at(-1), [{ handle: "bbb222", state: "queued" }]);
+	assert.deepEqual([readMetadata(run.runDir)?.state, readMetadata(run.runDir)?.parentPid], ["queued", owner.pid]);
+});
+
+test("two parents of one session, the owner gone: the other's tick starts its queued runs and becomes their owner", async () => {
+	process.env.PI_SUBAGENT_LIMIT = "2";
+	const dead = spawn("sleep", ["60"], { stdio: "ignore" });
+	const deadStarted = processStartTime(dead.pid!);
+	await kill(dead);
+	// A live process that now has the owner's process ID: another start time.
+	const reused = spawn("sleep", ["60"], { stdio: "ignore" });
+	children.push(reused);
+	const orphaned = queuedRun("aaa111", { parentPid: dead.pid, parentStarted: deadStarted });
+	const reusedPid = queuedRun("bbb222", { parentPid: reused.pid, parentStarted: "Mon Jan  1 00:00:00 2001" });
+	const { tick } = parentTick();
+
+	tick.wake();
+	await settleTmuxCalls();
+
+	assert.deepEqual(started().sort(), ["pi-subagent-aaa111", "pi-subagent-bbb222"]);
+	for (const run of [orphaned, reusedPid]) assert.equal(readMetadata(run.runDir)?.parentPid, process.pid);
 });
 
 test("two ticks of one session that list two queued runs at a limit of 1 start exactly one", async () => {
