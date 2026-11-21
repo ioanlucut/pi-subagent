@@ -69,13 +69,16 @@ afterEach(() => {
 
 /**
  * `pi --help`, as `spawn` asks it whether a light child knows its provider: `test` and `anthropic` are
- * built in; an extension directory provides the provider named in its file `provides`. Pi reports an unknown
- * provider on stderr, and exits 0.
+ * built in; an extension directory provides the provider named in its file `provides`, an extension file the one
+ * named in its line `// provides <name>`. Pi reports an unknown provider on stderr, and exits 0. Each extension
+ * it loads is appended to `help.log` beside it, so a test can tell which extensions were run.
  */
 const fakeHelp = `if (process.argv.includes("--help")) {
 	const argv = process.argv;
+	const fs = require("node:fs");
 	const provider = argv[argv.indexOf("--provider") + 1];
-	const provides = (dir) => { try { return [require("node:fs").readFileSync(dir + "/provides", "utf8").trim()]; } catch { return []; } };
+	const provides = (path) => { try { return fs.statSync(path).isDirectory() ? [fs.readFileSync(path + "/provides", "utf8").trim()] : [/\\/\\/ provides (\\S+)/.exec(fs.readFileSync(path, "utf8"))[1]]; } catch { return []; } };
+	for (const [i, arg] of argv.entries()) if (argv[i - 1] === "--extension") fs.appendFileSync(require("node:path").join(__dirname, "help.log"), arg + "\\n");
 	const known = ["test", "anthropic", ...argv.flatMap((arg, i) => (argv[i - 1] === "--extension" ? provides(arg) : []))];
 	if (!known.includes(provider)) process.stderr.write('Error: Unknown provider "' + provider + '". Use --list-models to see available providers/models.\\n');
 	process.exit(0);
@@ -755,17 +758,27 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
 });
 
+/** A fake command guard package in `dir`, shaped like the real one: its manifest names its extension file, returned. */
+function guardPackage(dir: string): string {
+	mkdirSync(join(dir, "dist"), { recursive: true });
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "cc-safety-net", pi: { extensions: ["./dist/index.js"] } }));
+	writeFileSync(join(dir, "dist", "index.js"), "");
+	return join(dir, "dist", "index.js");
+}
+
+/** The extension file of the guard `installGuard` installs. */
+const guardFile = () => join(agentDir(), "npm", "node_modules", "cc-safety-net", "dist", "index.js");
+
 /** Install a fake command guard where `pi install npm:cc-safety-net` puts it, and list it in Pi's packages. */
 function installGuard(): string {
-	const guard = join(agentDir(), "npm", "node_modules", "cc-safety-net");
-	mkdirSync(guard, { recursive: true });
+	mkdirSync(agentDir(), { recursive: true });
+	const guard = guardPackage(join(agentDir(), "npm", "node_modules", "cc-safety-net"));
 	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net@2.7.15"] }));
 	return guard;
 }
 
 test("spawn --extensions passes a command guard that Pi's packages list as a local path", async () => {
-	const guard = join(root, "checkouts", "cc-safety-net");
-	mkdirSync(guard, { recursive: true });
+	const guard = guardPackage(join(root, "checkouts", "cc-safety-net"));
 	mkdirSync(agentDir());
 	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:other", { source: "../checkouts/cc-safety-net" }] }));
 
@@ -776,12 +789,63 @@ test("spawn --extensions passes a command guard that Pi's packages list as a loc
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
 });
 
-test("spawn --extensions warns when Pi's packages have no command guard, and starts the child", async () => {
-	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+test("with no command guard in Pi's packages, spawn --no-extensions fails, and starts unguarded only with PI_SUBAGENT_ALLOW_UNGUARDED=1", async () => {
+	const env = spawnEnv(agentDir(), fakePi(join(root, "bin")));
+	const refused = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], env);
+
+	assert.equal(refused.status, 1);
+	assert.equal(
+		refused.stderr.split("\n").at(-2) + "\n",
+		"The command guard cc-safety-net is not installed or is turned off in Pi's packages, so a light child would run without it. Install it with `pi install npm:cc-safety-net`, drop --no-extensions or --extensions, or let the user set PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn.\n",
+	);
+	assert.deepEqual(listRuns(), []);
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], { ...env, PI_SUBAGENT_ALLOW_UNGUARDED: "1" });
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed in Pi's packages; the child runs without it\n");
-	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed or is turned off in Pi's packages; the child runs without it, as PI_SUBAGENT_ALLOW_UNGUARDED=1 allows\n");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts")]);
+});
+
+/**
+ * A local package with the extensions `a.ts` and `b.ts` in its `extensions` directory, each providing the provider
+ * in `provides`, listed in Pi's `packages` with `filter` as its `extensions`, after the command guard.
+ */
+function installFilteredPackage(provides: { a?: string; b?: string }, filter: string[]): { a: string; b: string; guard: string } {
+	const guard = installGuard();
+	const pkg = join(root, "checkouts", "tools");
+	mkdirSync(join(pkg, "extensions"), { recursive: true });
+	const a = join(pkg, "extensions", "a.ts");
+	const b = join(pkg, "extensions", "b.ts");
+	writeFileSync(a, provides.a ? `// provides ${provides.a}\n` : "");
+	writeFileSync(b, provides.b ? `// provides ${provides.b}\n` : "");
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net", { source: pkg, extensions: filter }] }));
+	return { a, b, guard };
+}
+
+test("a package with extensions [a.ts] in settings.json gives a light child only a.ts of that package, never the package root", async () => {
+	const { a, guard } = installFilteredPackage({ a: "extprov", b: "extprov" }, ["a.ts"]);
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		PI_PROVIDER: "extprov",
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, a]);
+});
+
+test("provider discovery never runs an extension that the package filter in settings.json disables, nor its package", () => {
+	const { b } = installFilteredPackage({ b: "extprov" }, ["!b.ts"]);
+	const bin = fakePi(join(root, "bin"));
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), PI_PROVIDER: "extprov" });
+
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /Provider extprov is not built in and no installed extension provides it/);
+	const loaded = readFileSync(join(bin, "help.log"), "utf8").trim().split("\n");
+	assert.deepEqual(loaded.filter((path) => b === path || b.startsWith(`${path}/`)), []);
+	assert.deepEqual(listRuns(), []);
 });
 
 test("spawn --extensions loads only the listed extensions, this extension, and the command guard", async () => {
@@ -818,13 +882,13 @@ test("the subagent tool refuses -cc-safety-net unless the user set PI_SUBAGENT_A
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
 });
 
-/** A package, listed in Pi's `packages` as a local path, that registers `provider`. */
+/** A package, listed in Pi's `packages` as a local path after the command guard, that registers `provider`. */
 function installProviderPackage(provider: string): string {
+	installGuard();
 	const pkg = join(root, "checkouts", `${provider}-pkg`);
 	mkdirSync(pkg, { recursive: true });
 	writeFileSync(join(pkg, "provides"), provider);
-	mkdirSync(agentDir(), { recursive: true });
-	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["../checkouts/other-pkg", pkg] }));
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net", "../checkouts/other-pkg", pkg] }));
 	mkdirSync(join(root, "checkouts", "other-pkg"), { recursive: true });
 	return pkg;
 }
@@ -840,7 +904,7 @@ test("spawn --no-extensions with an extension provider passes that provider's pa
 	assert.equal(result.status, 0, result.stderr);
 	const args = await childArgs(agentDir());
 	assert.ok(args.includes("--no-extensions"));
-	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), pkg]);
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guardFile(), pkg]);
 });
 
 test("spawn --extensions with a built-in provider adds no provider package", async () => {
@@ -849,7 +913,7 @@ test("spawn --extensions with a built-in provider adds no provider package", asy
 	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guardFile(), "/ext/a.ts"]);
 });
 
 test("spawn --no-extensions fails at once, naming the provider, when no installed package provides it", () => {

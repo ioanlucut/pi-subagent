@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listAgents } from "./agents.ts";
+import { piExtensions } from "./packages.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting, returnResults, takeResults } from "./outbox.ts";
 import { resumeRun, settleTmuxCalls, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import { reportStuckStarts } from "./start-check.ts";
@@ -38,43 +39,19 @@ const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high"
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
 const GUARD = "cc-safety-net";
 
-/** Where Pi keeps a package of its `settings.json`, after Pi's package manager: npm, git, or a local path. */
-function packagePath(source: string): string {
-	const agentDir = getAgentDir();
-	if (source.startsWith("npm:")) {
-		const spec = source.slice(4).trim();
-		const at = spec.indexOf("@", 1);
-		return join(agentDir, "npm", "node_modules", at === -1 ? spec : spec.slice(0, at));
-	}
-	const git = /^(?:git:|[a-z+]+:\/\/|git@)(?:[^@/]+@)?([^/:]+)[/:]([^@]+?)(?:\.git)?(?:@.*)?$/.exec(source);
-	if (git) return join(agentDir, "git", git[1], git[2]);
-	return resolve(agentDir, source.replace(/^~(?=\/|$)/, homedir()));
-}
-
-/** Where Pi installed each package of its `settings.json`, in their order; those not installed are left out. */
-function installedPackages(): string[] {
-	let packages: unknown = [];
-	try {
-		packages = (JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")) as { packages?: unknown }).packages;
-	} catch {
-		// No settings: no packages.
-	}
-	return (Array.isArray(packages) ? packages : []).flatMap((entry) => {
-		const source: unknown = typeof entry === "string" ? entry : (entry as { source?: unknown } | null)?.source;
-		if (typeof source !== "string") return [];
-		const path = packagePath(source);
-		return existsSync(path) ? [path] : [];
-	});
-}
-
 /**
- * The command guard where Pi installed it from its `packages`. Every child that does not load all
- * extensions loads it, so neither `--no-extensions` nor `--extensions` drops it. Not installed: a warning, no guard.
+ * The enabled extension files of the command guard, from Pi's packages or global extensions. Every child that does
+ * not load all extensions loads them, so neither `--no-extensions` nor `--extensions` drops it. Not installed: a light
+ * child would run unguarded, so `spawn` refuses unless the user allowed it.
  */
 function guardExtension(): string[] {
-	const guard = installedPackages().find((path) => basename(path) === GUARD);
-	if (guard) return [guard];
-	process.stderr.write(`Warning: the command guard ${GUARD} is not installed in Pi's packages; the child runs without it\n`);
+	const guard = piExtensions().filter((extension) => extension.enabled && basename(extension.owner).replace(/\.[jt]s$/, "") === GUARD).map((extension) => extension.path);
+	if (guard.length > 0) return guard;
+	if (process.env.PI_SUBAGENT_ALLOW_UNGUARDED !== "1")
+		fail(
+			`The command guard ${GUARD} is not installed or is turned off in Pi's packages, so a light child would run without it. Install it with \`pi install npm:${GUARD}\`, drop --no-extensions or --extensions, or let the user set PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn.`,
+		);
+	process.stderr.write(`Warning: the command guard ${GUARD} is not installed or is turned off in Pi's packages; the child runs without it, as PI_SUBAGENT_ALLOW_UNGUARDED=1 allows\n`);
 	return [];
 }
 
@@ -107,30 +84,22 @@ function piKnowsProvider(extensionArgs: string[], provider: string, model: strin
 	);
 }
 
-/** Each extension Pi finds in its global `extensions` directory: a `.ts` or `.js` file, or a directory. */
-function globalExtensions(): string[] {
-	const dir = join(getAgentDir(), "extensions");
-	try {
-		return readdirSync(dir, { withFileTypes: true })
-			.filter((entry) => !entry.name.startsWith(".") && entry.name !== "node_modules" && (entry.isDirectory() || /\.[jt]s$/.test(entry.name)))
-			.map((entry) => join(dir, entry.name));
-	} catch {
-		return [];
-	}
-}
-
 /**
- * The extension flag a light child also needs, so it knows its provider: none for a built-in one or one the
- * listed extensions provide, else the first installed package or global extension that provides it. Pi keeps
- * no record of which extension registered a provider, so each is asked, at the same time.
+ * The extension flags a light child also needs, so it knows its provider: none for a built-in one or one the
+ * listed extensions provide, else the enabled extensions of the first installed package or global extension that
+ * provides it. Pi keeps no record of which extension registered a provider, so each is asked, at the same time;
+ * an extension the user turned off is never asked, as asking runs it.
  */
 async function providerExtensionArgs(lightArgs: string[], provider: string, model: string, cwd: string): Promise<string[]> {
 	// Pi did not answer: the child starts as asked, and its pane's last lines tell what failed.
 	if ((await piKnowsProvider(lightArgs, provider, model, cwd)) !== false) return [];
-	const candidates = [...installedPackages(), ...globalExtensions()].filter((path) => !lightArgs.includes(path));
-	const provided = await Promise.all(candidates.map((path) => piKnowsProvider(["--no-extensions", "--extension", path], provider, model, cwd)));
-	const found = candidates.find((_path, i) => provided[i]);
-	if (found) return ["--extension", found];
+	const owners = new Map<string, string[]>();
+	for (const { path, enabled, owner } of piExtensions())
+		if (enabled && !lightArgs.includes(path)) owners.set(owner, [...(owners.get(owner) ?? []), path]);
+	const candidates = [...owners.values()].map((paths) => paths.flatMap((path) => ["--extension", path]));
+	const provided = await Promise.all(candidates.map((args) => piKnowsProvider(["--no-extensions", ...args], provider, model, cwd)));
+	const found = candidates.find((_args, i) => provided[i]);
+	if (found) return found;
 	fail(
 		`Provider ${provider} is not built in and no installed extension provides it, so a light child cannot use it. Drop --no-extensions or --extensions, or pick a built-in provider with --provider.`,
 	);

@@ -233,12 +233,14 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--file <path>`                        |                                                      | Repeatable. Attached to the first turn.                                               |
 | `--no-context-files`                   | off                                                  | Ignore `AGENTS.md` and `CLAUDE.md`, for a review those must not bias.                 |
 | `--no-extensions`                      | off                                                  | No extensions except the subagent control bridge, the command guard `cc-safety-net`, and the package that provides the child's provider (see below). |
-| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard only when `PI_SUBAGENT_ALLOW_UNGUARDED=1`; else `spawn` refuses it. When `packages` has no guard, `spawn` prints a warning. |
+| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path) or `~/.pi/agent/extensions/`; `-cc-safety-net` in the list drops the guard only when `PI_SUBAGENT_ALLOW_UNGUARDED=1`; else `spawn` refuses it. When no enabled guard is installed, `spawn` refuses a light child, unless `PI_SUBAGENT_ALLOW_UNGUARDED=1`. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
 | `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch and from each new turn of an idle child. A child that has not answered by then (still starting, at the trust prompt, working, or idle before its first turn) is stopped and reported as `timed out`; its run and transcript stay. A child that answered and is idle is not stopped. |
 
 A light child (`--no-extensions` or `--extensions`) also loads the extension that provides its provider, such as `router` or `claude-code`, which `--no-extensions` would drop. `spawn` asks Pi (`pi --help` with the light flags) whether the child knows the provider; when not, it asks the same of each installed package in Pi's `packages` and each global extension in `~/.pi/agent/extensions/`, at once, and adds the first that provides it. When none does, `spawn` fails at once and names the provider. A built-in provider adds nothing.
+
+A light child loads only the extension files you left on: a package's filter in `settings.json` (`{ "source": "npm:…", "extensions": ["a.ts"] }`, Pi's "Select package resources", or `pi config`) holds for the guard and the provider package too, and `spawn` never runs an extension you turned off, not even to ask it for a provider.
 
 ## Configuration
 
@@ -250,7 +252,7 @@ A light child (`--no-extensions` or `--extensions`) also loads the extension tha
 | `PI_SUBAGENT_HERDR_PANES=0` | on inside Herdr | No Herdr pane per working child. |
 | `PI_SUBAGENT_WORKTREE_ROOT` | `~/WORK/dev/.worktrees` | Root for `--worktree`; the worktree is `<root>/<repo>/<topic>`. |
 | `PI_SUBAGENT_PI` | `pi` | The program a child runs, for tests. |
-| `PI_SUBAGENT_ALLOW_UNGUARDED=1` | unset | `spawn` accepts `-cc-safety-net` in `--extensions` and starts the child without the command guard. Set it before you start Pi: the model writes the tool's parameters, so it must not be able to drop the guard alone. |
+| `PI_SUBAGENT_ALLOW_UNGUARDED=1` | unset | `spawn` accepts `-cc-safety-net` in `--extensions`, and starts a light child when no command guard is installed; the child runs without the command guard. Set it before you start Pi: the model writes the tool's parameters, so it must not be able to drop the guard alone. |
 
 `PI_SUBAGENT_PARENT_PID`, `PI_SUBAGENT_PARENT_STARTED`, `PI_SUBAGENT_QUEUE`, `PI_SUBAGENT_RUN_DIR`, and `PI_SUBAGENT_NESTED` pass state between the parent, the CLI, and the child; the package sets them, do not set them yourself.
 
