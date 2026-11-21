@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findAgent, listAgents } from "./agents.ts";
+import { listAgents } from "./agents.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting, returnResults, takeResults } from "./outbox.ts";
 import { resumeRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import {
@@ -51,8 +51,8 @@ function packagePath(source: string): string {
 }
 
 /**
- * The command guard where Pi installed it from its `packages`. A light child loads it unless the list
- * names `-cc-safety-net`, so `--extensions` cannot drop it by mistake. Not installed: a warning, no guard.
+ * The command guard where Pi installed it from its `packages`. Every child that does not load all
+ * extensions loads it, so neither `--no-extensions` nor `--extensions` drops it. Not installed: a warning, no guard.
  */
 function guardExtension(): string[] {
 	let packages: unknown = [];
@@ -75,7 +75,11 @@ function guardExtension(): string[] {
 function lightExtensionArgs(list: string): string[] {
 	const names = list.split(",").map((name) => name.trim()).filter(Boolean);
 	if (names.length === 0) fail("--extensions requires at least one extension");
-	const guard = names.includes(`-${GUARD}`) ? [] : guardExtension();
+	const unguarded = names.includes(`-${GUARD}`);
+	// The model writes the tool's parameters, so it could drop the guard in one call; only the user sets the environment.
+	if (unguarded && process.env.PI_SUBAGENT_ALLOW_UNGUARDED !== "1")
+		fail(`-${GUARD} drops the command guard; only the user can allow it, with PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn`);
+	const guard = unguarded ? [] : guardExtension();
 	const listed = names.filter((name) => name !== `-${GUARD}`).map((name) => (/^[a-z]+:/.test(name) ? name : resolve(name)));
 	return ["--no-extensions", ...[extensionPath, ...guard, ...listed].flatMap((path) => ["--extension", path])];
 }
@@ -189,9 +193,10 @@ function applyAgent(args: string[]): { args: string[]; instructions?: string } {
 	const index = args.indexOf("--agent");
 	if (index === -1) return { args };
 	const name = valueAfter(args, index, "--agent");
-	const agent = findAgent(process.cwd(), name);
+	const agents = listAgents(process.cwd());
+	const agent = agents.find((each) => each.name === name);
 	if (!agent) {
-		const known = listAgents(process.cwd()).map((each) => each.name);
+		const known = agents.map((each) => each.name);
 		fail(`Unknown agent: ${name} (known: ${known.length ? known.join(", ") : "none"}; see \`subagent agents\`)`);
 	}
 	if (agent.ignoredExtensions) {
@@ -324,7 +329,7 @@ function spawnSubagent(callerArgs: string[]): void {
 
 	const launchArgs: string[] = [];
 	if (tools) launchArgs.push("--tools", tools);
-	if (noExtensions) launchArgs.push("--no-extensions", "--extension", extensionPath);
+	if (noExtensions) launchArgs.push("--no-extensions", ...[extensionPath, ...guardExtension()].flatMap((path) => ["--extension", path]));
 	launchArgs.push(...lightArgs);
 	if (noMcp) launchArgs.push("--no-mcp");
 	if (noSkills) launchArgs.push("--no-skills");
