@@ -156,10 +156,10 @@ export function inboxDir(runDir: string): string {
 	return join(runDir, "inbox");
 }
 
-/** Whether a result waits for the parent; the outbox module reads and sends it. */
+/** Whether a result waits for the parent, also one sent that is not in its session yet; the outbox module reads and sends it. */
 function hasOutbox(runDir: string): boolean {
 	const dir = join(runDir, "outbox");
-	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".txt"));
+	return existsSync(dir) && readdirSync(dir).some((file) => file.endsWith(".txt") || file.endsWith(".sent"));
 }
 
 /** Whether a `send` is queued that the child has not taken yet. */

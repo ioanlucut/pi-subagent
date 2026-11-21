@@ -82,17 +82,29 @@ function queuedRun(handle: string): RunMetadata {
 
 const started = () => tmuxCalls().filter((call) => call.startsWith("new-session")).map((call) => call.split(" ")[3]);
 
-/** A parent's tick that records what it shows and what it sends. */
-function parentTick(ready = () => true) {
+/**
+ * A parent's tick that records what it shows and what it sends. Each sent result reaches the session, as in
+ * an idle Pi, unless `reaches` says no; `delivered` holds the results the session has.
+ */
+function parentTick(ready = () => true, { reaches = () => true, delivered = new Set<string>() } = {}) {
 	const shown: { handle: string; state: RunState }[][] = [];
 	const sent: string[] = [];
+	const sentResults: string[] = [];
 	const tick = new SessionTick({
 		sessionId: () => "parent",
 		show: (rows) => shown.push(rows.map(({ run, state }) => ({ handle: run.handle, state }))),
-		deliver: { ready, send: (text) => sent.push(text) },
+		deliver: {
+			ready,
+			send: (text, results) => {
+				sent.push(text);
+				sentResults.push(...results);
+				if (reaches()) for (const result of results) delivered.add(result);
+			},
+			delivered: () => delivered,
+		},
 	});
 	ticks.push(tick);
-	return { tick, shown, sent };
+	return { tick, shown, sent, sentResults };
 }
 
 async function kill(child: ChildProcess): Promise<void> {
@@ -181,6 +193,73 @@ test("a result that cannot be sent yet keeps the tick until it is sent", async (
 	const count = shown.length;
 	mock.timers.tick(5000);
 	assert.equal(shown.length, count);
+});
+
+test("a result taken while the parent is busy is not sent; it is sent once when the parent is idle", () => {
+	let idle = false;
+	const { tick, sent } = parentTick(() => idle);
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	tick.wake();
+
+	mock.timers.tick(3000);
+	assert.deepEqual(sent, [], "a busy Pi would hold it in memory, where Escape or a quit drops it");
+	assert.equal(readdirSync(join(run.runDir, "outbox")).length, 1, "it stays on disk");
+
+	idle = true;
+	mock.timers.tick(5000);
+	assert.deepEqual(sent, ["Subagent aaa111 finished\n\nthe answer"]);
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
+});
+
+/** Move the send time of each result of the run back, as fake timers do not move the clock files use. */
+function setMtime(run: RunMetadata, ms: number): void {
+	const dir = join(run.runDir, "outbox");
+	for (const file of readdirSync(dir)) utimesSync(join(dir, file), new Date(ms), new Date(ms));
+}
+
+test("a sent result that never reaches the session is sent again; one that reached it is never sent twice", () => {
+	let reaches = false;
+	const delivered = new Set<string>();
+	const { tick, sent } = parentTick(() => true, { reaches: () => reaches, delivered });
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	tick.wake();
+	assert.equal(sent.length, 1);
+
+	// The turn it started was cut, or Pi rejected it: the session has no such message.
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 1, "not at once: the message may be on its way");
+	setMtime(run, Date.now() - 5000);
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 2, "sent again on the next idle tick");
+	assert.equal(sent[1], sent[0]);
+
+	reaches = true;
+	setMtime(run, Date.now() - 5000);
+	mock.timers.tick(1000);
+	assert.equal(sent.length, 3);
+	mock.timers.tick(5000);
+	assert.equal(sent.length, 3, "in the session: not sent again");
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
+});
+
+test("a result in the session that the parent quit before it could delete is not sent again after resume", () => {
+	const first = parentTick(() => true, { reaches: () => false });
+	const { run } = liveRun("aaa111", { state: "idle" });
+	writeResult(run, "finished", "the answer");
+	first.tick.wake();
+	assert.equal(first.sent.length, 1);
+	// The message reaches the session after the tick; the parent quits before the next tick.
+	first.tick.stop();
+	assert.equal(readdirSync(join(run.runDir, "outbox")).length, 1);
+
+	// The resumed Pi finds the message in its session.
+	const second = parentTick(() => true, { delivered: new Set(first.sentResults) });
+	second.tick.wake();
+	mock.timers.tick(3000);
+	assert.deepEqual(second.sent, []);
+	assert.deepEqual(readdirSync(join(run.runDir, "outbox")), []);
 });
 
 test("a result of an exited child that the parent quit before sending arrives once after resume", async () => {
@@ -489,7 +568,7 @@ test("with a slow tmux, a queued child that fails to start is reported once, aft
 	const tick = new SessionTick({
 		sessionId: () => "parent",
 		show: (rows) => shown.push(rows.map(({ run, state }) => ({ handle: run.handle, state }))),
-		deliver: { ready: () => true, send: (text) => sent.push(text) },
+		deliver: { ready: () => true, send: (text) => sent.push(text), delivered: () => new Set() },
 		onStartError: (_run, message) => errors.push(message),
 	});
 	ticks.push(tick);
