@@ -1,34 +1,124 @@
 # Pi Subagent
 
-Observable, persistent [Pi](https://pi.dev) subagents for independent reviews, investigations, and delegated implementation.
+Let your [Pi](https://pi.dev) hand work to other Pis, watch them, and get their answers back.
 
-Each subagent is a full Pi in its own tmux session, with its own JSONL transcript. The parent starts it with the `subagent` model tool or the `subagent` CLI, keeps working, and gets the child's answer as a chat message. You can watch each child, steer it, attach to it, or stop it. A child is a normal, full Pi, not a stripped-down tool call.
+A **subagent** (or **child**) is a second, full Pi that your Pi (the **parent**) starts for one job: review a diff, investigate a bug, implement a ticket. Each child runs in its own terminal session with its own memory of the conversation, so it does not fill the parent's context, and several children can work at the same time. You keep working with the parent; each child's answer arrives in your chat when it is done.
 
-## Features
+```text
+you ──► parent Pi ──spawn──► child "review"     (own Pi, own tmux session, read-only tools)
+                  ──spawn──► child "impl-17"    (own Pi, own Git worktree)
+                  ◄──────── "Subagent review (a1b2c3) finished … <answer>"
+```
 
-| Area | What you get |
-| --- | --- |
-| **Delegate** | A `subagent` model tool and a `subagent` CLI with the same actions: `spawn`, `list`, `status`, `wait`, `send`, `stop`, `resume`, `last`, `agents`. The bundled skill teaches the model when and how to use them. |
-| **Results** | Each finished turn arrives in the parent chat as a message, so the parent does not block. A long answer arrives as its first 2,000 characters and the path of a file with the whole answer. `subagent last` prints it whole. |
-| **Steer** | `send` starts a new turn or steers a busy one; `--follow-up` queues a turn; `interrupt` ends a busy turn, like Escape. |
-| **Watch** | One row per child below the editor: state, time, last action, tokens, cost. Inside [Herdr](https://github.com/herdrdev/herdr), each working child opens in a read-only pane beside the parent. `/subagent` attaches to a child's TUI. |
-| **Queue** | At most 4 children of one session run at once (`subagentLimit`). The rest queue and start by themselves, in order, when a slot is free. |
-| **Time limits** | `--timeout 10m` stops a child that has not answered by its deadline and reports it as `timed out`. An idle child that has answered is not stopped. A child whose first prompt Pi rejects (no login, unknown model) is stopped after 15 s and reported as `failed to start`, with Pi's error. |
-| **Roles** | Agent files in `~/.pi/agent/agents/` or a project's `.pi/agents/` hold a role's model, thinking level, tools, extensions, and instructions: `spawn --agent implementer`. A project agent file cannot load code. |
-| **Light children** | `--extensions <list>` loads only the listed extensions; `--no-mcp` starts no MCP servers. The command guard `cc-safety-net` stays in each child, also with `--no-extensions`; only you can drop it, with `PI_SUBAGENT_ALLOW_UNGUARDED=1`. |
-| **Worktrees** | `--worktree <topic> --base <branch>` gives a child its own Git worktree and branch under `~/WORK/dev/.worktrees/<repo>/<topic>`, so parallel implementers do not conflict. |
-| **Lifecycle** | Quitting the parent suspends its children; resuming the parent session starts them again with their full history, and a child cut mid-task continues it and reports its result. A parent that dies leaves no running children: the next Pi suspends them. Transcripts stay after `stop`, and `pi --resume` can continue them. |
-| **Fast parent** | The parent checks its children with no program start, and only while it has children. A session with no children does no subagent work. On a busy machine this was the difference between a frozen Pi and a responsive one. |
-| **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. |
-| **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. |
-| **Verified** | `npm test` (202 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login); CI runs `npm test` and `verify:e2e`. See Development. |
+## What it does for you
 
-This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at). Upstream has issues and pull requests disabled, so the changes live here. Upstream gives each child a tmux session and its transcript, the CLI (`spawn`, `list`, `status`, `wait`, `send` with `--follow-up`, `stop`), attaching to a child's TUI, and suspend and resume with the parent session. This fork adds the rest of the table, including the model tool, result messages, the rows and Herdr panes, the queue, time limits, agent files, light children, worktrees, the fast parent, and the locks. Two upstream bugs are fixed:
+**Ask in plain words.** Say "get a second opinion on this diff from another model" or "implement these three tickets in parallel". Pi already knows how: the package gives it a `subagent` tool and a skill that explains when and how to use it.
+
+**Answers come to you.** When a child finishes, its answer appears in the parent chat as a message. Nobody has to wait or poll. A long answer arrives as its first 2,000 characters plus the path of a file with all of it.
+
+**You can see every child.** Below the Pi editor, each child has one line: what it is doing now, for how long, and what it has cost so far. Inside [Herdr](https://github.com/herdrdev/herdr), each working child also opens in a pane beside you, read-only, and the pane closes when the child is done. `/subagent` lets you jump into any child's own Pi screen.
+
+**It does not slow your Pi down.** The parent checks on its children without starting a single program, and only while it has children. (The version this fork started from asked `tmux` about every child twice a second, and on a busy Mac that froze Pi for seconds.)
+
+**It does not overload your machine.** At most 4 children of one session run at once. The rest wait in a queue and start by themselves when a slot is free. A finished child keeps its slot until you stop it, and Pi tells the model which children to stop when another one is waiting.
+
+**Children cannot run for ever.** Give one a time limit (`--timeout 10m`): if it has not answered by then, it is stopped and you are told. A child that cannot start (no login for its model, a folder that asks for trust) is reported within about 15 seconds instead of waiting silently.
+
+**Parallel coding without conflicts.** `--worktree 17_login` gives a child its own Git worktree and branch, so ten implementers can edit the same repository at once.
+
+**Roles you write once.** An agent file (`~/.pi/agent/agents/implementer.md`) holds a role's model, thinking level, tools, and instructions. Then `spawn --agent implementer` is enough.
+
+**Light and fast children.** A review child does not need all your MCP servers and extensions: `--no-extensions --no-mcp` starts it with almost nothing, and it still gets the model provider it needs.
+
+**Safe by default.** Every child keeps the command guard [`cc-safety-net`](https://ccsafetynet.com); only you, not the model, can turn it off. A cloned repository cannot use its agent files to run its own code, read your files, or pass options to Pi. Each child uses the same logins and `PATH` as the shell that started it.
+
+**Work survives a quit or a crash.** Quit Pi and its children are paused with their history; start the session again and they continue, and a child that was in the middle of a task finishes it and sends its answer. If Pi crashes, the next Pi pauses the children it left behind. An answer stays on disk until it is really in your chat. `stop` keeps the child's transcript, so you can read it later or continue it with `pi --resume`.
+
+## Typical uses
+
+**A second opinion from another model.** Ask Pi:
+
+```text
+Get a review of the current diff from a subagent on gpt-6.2-astra, read-only.
+```
+
+Pi runs, through its `subagent` tool:
+
+```sh
+subagent spawn --name review --provider openai-codex --model gpt-6.2-astra \
+  --tools read,grep,find,ls --no-extensions --no-mcp \
+  --prompt "Review the current diff: real bugs only, with path:line and a fix."
+```
+
+It goes on with your work, and a minute later the answer appears:
+
+```text
+Subagent review (a1b2c3) finished
+
+1. P1 src/cart.ts:42 total ignores the discount when …
+
+[The whole answer: ~/.pi/agent/sessions/--…--/…answers/….md]
+```
+
+**Implement several tickets in parallel.** Ask Pi to implement a spec with one subagent per ticket. Each child gets its own worktree, at most 4 run at once, and each result arrives as a message:
+
+```sh
+subagent spawn --name impl-17 --worktree 17_login --base main --timeout 30m --file spec.md --prompt "Implement ticket 17"
+subagent spawn --name impl-18 --worktree 18_logout --base main --timeout 30m --file spec.md --prompt "Implement ticket 18"
+# … a fifth spawn prints:
+# State: queued, starts when fewer than 4 children run. 1 idle child holds a slot: impl-17 (a1b2c3). Stop the ones you need no more to free a slot.
+```
+
+When ticket 17 is merged, `subagent stop a1b2c3` frees its slot and the queued child starts. A merger child can then work on the existing integration branch: `subagent spawn --name merger --worktree integration --prompt "Merge 17 and 18"`.
+
+**Audit with three models.** One model finds some bugs and misses others. The Audit recipe below spawns three read-only reviewers on different models and lets the parent check each finding against the code.
+
+## Features in detail
+
+| Area | What you get | Where to read more |
+| --- | --- | --- |
+| **Delegate** | A `subagent` model tool and a `subagent` CLI with the same actions: `spawn`, `list`, `status`, `wait`, `send`, `stop`, `resume`, `last`, `agents`. The bundled skill teaches the model when and how to use them. | Commands |
+| **Results** | Each finished turn arrives in the parent chat as a message. A long answer arrives as its first 2,000 characters and the path of a file with the whole answer. An answer stays on disk until it is in the parent's session, so Escape or a quit does not lose it. | Results arrive as messages |
+| **Steer** | `send` starts a new turn or steers a busy one; `--follow-up` queues a turn; `interrupt` ends a busy turn, like Escape. | Commands |
+| **Watch** | One row per child below the editor: state, time, last action, tokens, cost. Inside Herdr, each working child opens in a read-only pane beside the parent. `/subagent` attaches to a child's TUI. | Watch children in Herdr |
+| **Queue** | At most 4 children of one session run at once (`subagentLimit`). The rest queue and start by themselves, in order. The model is told which idle children to stop. | At most 4 children run at once |
+| **Time limits** | `--timeout 10m` stops a child that has not answered by its deadline and reports `timed out`. A child whose first prompt Pi rejects is reported as `failed to start` after 15 s, with Pi's error; one at Pi's trust prompt is reported as waiting for trust. | Spawn options, Lifecycle |
+| **Roles** | Agent files in `~/.pi/agent/agents/` or a project's `.pi/agents/` hold a role's model, thinking level, tools, extensions, and instructions. A project agent file cannot load code, cannot pass Pi options, and must be a real file inside the project. | Agent files |
+| **Light children** | `--extensions <list>`, `--no-extensions`, `--no-mcp`. The child still gets the package that provides its model (`claude-code`, `router`, …). | Spawn options |
+| **Command guard** | `cc-safety-net` stays in every child, also light ones. Only you can turn it off, with `PI_SUBAGENT_ALLOW_UNGUARDED=1` before Pi starts. | Configuration |
+| **Worktrees** | `--worktree <topic> --base <branch>` gives a child its own Git worktree and branch under `~/WORK/dev/.worktrees/<repo>/<topic>`; an existing branch is used as it is. | Hand off implementation |
+| **Lifecycle** | Quit suspends a Pi's own children; resume starts them again, and a child cut mid-task continues it. A crashed parent leaves no running children. Another Pi on the same session leaves your children alone. | Lifecycle |
+| **Fast parent** | The parent checks its children with no program start, and only while it has children. Herdr panes and quit run in the background. | How it works |
+| **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. | How it works |
+| **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. | Fixed upstream bugs below |
+| **Verified** | `npm test` (202 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login); CI runs `npm test` and `verify:e2e`. | Development |
+
+## Where this fork comes from
+
+This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent) by [Mario Zechner](https://mariozechner.at). His design is the core: each child is a full Pi in its own tmux session, answers come from the child's saved transcript and not from its screen, and children are suspended and resumed with their parent session. Upstream has the CLI (`spawn`, `list`, `status`, `rename`, `wait`, `send` with `--follow-up`, `stop`) and attaching to a child.
+
+Upstream has issues and pull requests disabled, so the changes live here. Everything else in the tables above was added here: the model tool, result messages, the rows and Herdr panes, the queue, time limits and start checks, agent files, light children, the always-on guard, worktrees, the fast parent, resume that finishes cut work, and the locks. Why each change was made, and how it was checked, is in [spec #14](https://github.com/ioanlucut/pi-subagent/issues/14) and the pull requests [#25](https://github.com/ioanlucut/pi-subagent/pull/25), [#51](https://github.com/ioanlucut/pi-subagent/pull/51), [#53](https://github.com/ioanlucut/pi-subagent/pull/53), and [#59](https://github.com/ioanlucut/pi-subagent/pull/59). Two upstream bugs are fixed:
 
 | Issue                                                   | Upstream behaviour                                                                                                                                           | Here                                                                                  |
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
 | [#1](https://github.com/ioanlucut/pi-subagent/issues/1) | A child takes the environment of whatever process started the tmux server, so it can run with another `PI_CODING_AGENT_DIR` (other logins) or an old `PATH`. | A child gets the environment of the shell that ran `subagent spawn`.                  |
 | [#2](https://github.com/ioanlucut/pi-subagent/issues/2) | Children keep running when the parent dies without quitting (crash, `kill -9`, closed terminal). Quitting stops children one by one, 2 s each.               | The next Pi to start suspends orphaned children. Quitting stops all children at once. |
+
+## Words used here
+
+| Word | Meaning |
+| --- | --- |
+| parent | The Pi you work with. It starts children and gets their answers. |
+| child, subagent | A Pi the parent started for one job, in its own tmux session. |
+| handle | A child's short ID, such as `a1b2c3`. Every command takes it. |
+| turn | One piece of work by a child: from a prompt to its answer. |
+| idle | A child that has answered and waits for a new message. It still holds a slot. |
+| slot | One of the places for a running child; 4 per session by default. |
+| queued | A child that waits for a free slot. It starts by itself. |
+| suspended | A child that was paused because its parent quit or died. It starts again when the parent session starts again. |
+| light child | A child started with few or no extensions and MCP servers, to start fast. |
+| agent file | A Markdown file that holds a role: model, tools, instructions. |
+| command guard | `cc-safety-net`, the Pi package that blocks destructive commands such as `git reset --hard`. |
 
 ## Requirements
 
@@ -399,6 +489,14 @@ npm test
 ```
 
 Upstream has no license file.
+
+## Help and known limits
+
+- A child does not start or answers nothing: `subagent status <handle>` shows its state, and `tmux attach -t pi-subagent-<handle>` shows its screen. A child that cannot start is reported within about 15 s with Pi's error.
+- Your Pi feels slow with children: check that the parent loads this version (`subagent agents` works; older versions have no such command); a child started by an older version still costs `tmux` calls each second until you stop it.
+- A queued child does not start: a finished child still holds its slot. `subagent list`, then `subagent stop` the ones you no longer need.
+- A `send --follow-up` that is still queued in a child when the parent quits can be lost; send it again after resume.
+- Open edge cases, mostly rare timing, are listed in [#36](https://github.com/ioanlucut/pi-subagent/issues/36).
 
 ## Credits
 
