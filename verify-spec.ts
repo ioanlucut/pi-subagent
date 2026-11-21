@@ -184,6 +184,11 @@ const suites: [string, string[], string[]][] = [
 		"a quit before the child saved its first prompt resumes it with that prompt, and the parent gets one result",
 		"a child idle at quit resumes idle, with no message and no result",
 	]],
+	["#54", ["subagent.test.ts"], [
+		"spawn --no-extensions with an extension provider passes that provider's package to the child",
+		"spawn --no-extensions fails at once, naming the provider, when no installed package provides it",
+		"a child whose Pi exits at start is reported with its error text, before its grace time ends",
+	]],
 ];
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 for (const [ticket, files, names] of suites) {

@@ -6,6 +6,7 @@ import {
 	inboxHasMessages,
 	inStartingGrace,
 	keptTranscriptPath,
+	lastPaneLines,
 	listRuns,
 	readLatestAssistant,
 	readMetadata,
@@ -125,12 +126,19 @@ export function reportExitedRuns(runs: RunMetadata[]): boolean {
 	let waiting = false;
 	for (const run of runs) {
 		if (run.suspended || existsSync(exitKnownPath(run.runDir)) || effectiveRunState(run) !== "exited") continue;
-		if (inStartingGrace(run)) {
+		const lines = run.childPid === null ? lastPaneLines(run.runDir) : undefined;
+		if (lines === undefined && inStartingGrace(run)) {
 			waiting = true;
 			continue;
 		}
 		markExitKnown(run.runDir);
-		writeResult(run, "exited", "Its process ended and nobody stopped it. Spawn the task again if you still need the result.");
+		writeResult(
+			run,
+			"exited",
+			lines === undefined
+				? "Its process ended and nobody stopped it. Spawn the task again if you still need the result."
+				: `Its process ended before it started. Its last lines:\n\n${lines}\n\nFix the cause, then spawn the task again.`,
+		);
 	}
 	return waiting;
 }
