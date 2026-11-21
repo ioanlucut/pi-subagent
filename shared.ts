@@ -639,9 +639,10 @@ function hasUserMessage(sessionFile: string): boolean {
  * The parent quits or leaves the session: suspend its running and queued children, so resuming the session
  * starts them again within 24 h; remove those that already exited on their own. An exited child whose result
  * the parent has not sent yet stays as it is, so the tick sends it after resume and the next quit removes it.
+ * Another Pi on the same session (an observer, `pi --session` in a second terminal) keeps its own children.
  */
 export async function suspendSessionRuns(sessionId: string): Promise<void> {
-	const runs = listRuns(sessionId);
+	const runs = listRuns(sessionId).filter((run) => actsAsParent(run));
 	for (const run of runs.filter((run) => run.state === "queued")) {
 		// Never started: its saved launch keeps the first prompt for resume.
 		skippingBusyRun(() => updateMetadata(run.runDir, { state: "exited", suspended: true, suspendedAt: new Date().toISOString() }));
@@ -689,6 +690,15 @@ function endSessionsWithoutRun(): void {
 		if (dirname(runDir) !== runsDir || existsSync(runDir)) continue;
 		spawnSync("tmux", ["kill-session", "-t", session], { stdio: "ignore" });
 	}
+}
+
+/**
+ * Whether this Pi is the run's parent: the Pi that owns it, or any Pi of its session when its owner is gone.
+ * `exact: false` starts no program, for the tick: an owner whose process ID was reused still counts as live.
+ */
+export function actsAsParent(run: RunMetadata, { exact = true } = {}): boolean {
+	if (run.parentPid === undefined || run.parentPid === process.pid) return true;
+	return exact ? parentIsGone(run) : !processExists(run.parentPid);
 }
 
 function parentIsGone(run: RunMetadata): boolean {

@@ -53,6 +53,9 @@ beforeEach(() => {
 	delete process.env.PI_SUBAGENT_NOTIFY;
 	delete process.env.PI_SUBAGENT_QUEUE;
 	delete process.env.PI_SUBAGENT_LIMIT;
+	// Set when the tests run from a Pi: a run would name that Pi as its owner, and a quit here would not suspend it.
+	delete process.env.PI_SUBAGENT_PARENT_PID;
+	delete process.env.PI_SUBAGENT_PARENT_STARTED;
 	process.env.PI_CODING_AGENT_DIR = join(root, "agent");
 });
 
@@ -334,6 +337,38 @@ function endTurn(run: RunMetadata, answer: string): string[] {
 	reportSettledTurn(run.runDir);
 	return readdirSync(join(run.runDir, "outbox")).map((file) => readFileSync(join(run.runDir, "outbox", file), "utf8"));
 }
+
+test("two parents of one session: the second quits, and only its own child is suspended", async () => {
+	// The first parent: another Pi that still runs. The second: this process, which quits.
+	const first = spawn("sleep", ["60"], { stdio: "ignore" });
+	try {
+		spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(first.pid), PI_SUBAGENT_PARENT_STARTED: processStartTime(first.pid!) });
+		spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(process.pid), PI_SUBAGENT_PARENT_STARTED: processStartTime(process.pid) });
+		const other = listRuns().find((run) => run.parentPid === first.pid)!;
+		const own = listRuns().find((run) => run.parentPid === process.pid)!;
+		await Promise.all([other, own].map(startedChild));
+
+		await suspendSessionRuns("parent");
+
+		assert.equal(tmuxSessionExists(own.tmuxSession), false);
+		assert.equal(readMetadata(own.runDir)?.suspended, true);
+		assert.equal(tmuxSessionExists(other.tmuxSession), true, "the first parent's child still works");
+		assert.equal(readMetadata(other.runDir)?.suspended, undefined);
+	} finally {
+		first.kill("SIGKILL");
+	}
+});
+
+test("a quit suspends a run of its session whose owner died, as before", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_PARENT_PID: String(deadPid()) });
+	const [run] = listRuns();
+	await startedChild(run);
+
+	await suspendSessionRuns("parent");
+
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
+	assert.equal(readMetadata(run.runDir)?.suspended, true);
+});
 
 test("a child busy at quit is resumed with the continue message, and the parent gets one result for it", async () => {
 	spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_NOTIFY: "1" }, ["--timeout", "1h"]);

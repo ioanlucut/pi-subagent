@@ -201,6 +201,28 @@ test("a result of an exited child that the parent quit before sending arrives on
 	assert.equal(existsSync(run.runDir), false, "the next quit removes the run, as it has nothing left to send");
 });
 
+test("two parents of one session: a result reaches only the owner's chat, once", () => {
+	// The owner: another live Pi. This process is a second Pi on the same session.
+	const owner = spawn("sleep", ["60"], { stdio: "ignore" });
+	children.push(owner);
+	const { run } = liveRun("aaa111", { state: "idle", parentPid: owner.pid });
+	writeResult(run, "finished", "the answer");
+	const second = parentTick();
+	second.tick.wake();
+	mock.timers.tick(3000);
+	assert.deepEqual(second.sent, [], "the second Pi shows the run but does not send its result");
+	assert.deepEqual(second.shown.at(-1), [{ handle: "aaa111", state: "idle" }]);
+
+	// The owner's tick, here with this process's ID.
+	updateMetadata(run.runDir, { parentPid: process.pid });
+	const first = parentTick();
+	first.tick.wake();
+	mock.timers.tick(3000);
+	assert.equal(first.sent.length, 1);
+	assert.match(first.sent[0], /^Subagent aaa111 finished\n\nthe answer/);
+	assert.deepEqual(second.sent, []);
+});
+
 test("a result held by a cancelled wait keeps the tick, and arrives when the wait's claim expires", async () => {
 	const { tick, sent } = parentTick();
 	const { run, child } = liveRun("aaa111");
