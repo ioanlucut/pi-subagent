@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,23 +50,29 @@ function packagePath(source: string): string {
 	return resolve(agentDir, source.replace(/^~(?=\/|$)/, homedir()));
 }
 
-/**
- * The command guard where Pi installed it from its `packages`. Every child that does not load all
- * extensions loads it, so neither `--no-extensions` nor `--extensions` drops it. Not installed: a warning, no guard.
- */
-function guardExtension(): string[] {
+/** Where Pi installed each package of its `settings.json`, in their order; those not installed are left out. */
+function installedPackages(): string[] {
 	let packages: unknown = [];
 	try {
 		packages = (JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")) as { packages?: unknown }).packages;
 	} catch {
 		// No settings: no packages.
 	}
-	for (const entry of Array.isArray(packages) ? packages : []) {
+	return (Array.isArray(packages) ? packages : []).flatMap((entry) => {
 		const source: unknown = typeof entry === "string" ? entry : (entry as { source?: unknown } | null)?.source;
-		if (typeof source !== "string") continue;
+		if (typeof source !== "string") return [];
 		const path = packagePath(source);
-		if (basename(path) === GUARD && existsSync(path)) return [path];
-	}
+		return existsSync(path) ? [path] : [];
+	});
+}
+
+/**
+ * The command guard where Pi installed it from its `packages`. Every child that does not load all
+ * extensions loads it, so neither `--no-extensions` nor `--extensions` drops it. Not installed: a warning, no guard.
+ */
+function guardExtension(): string[] {
+	const guard = installedPackages().find((path) => basename(path) === GUARD);
+	if (guard) return [guard];
 	process.stderr.write(`Warning: the command guard ${GUARD} is not installed in Pi's packages; the child runs without it\n`);
 	return [];
 }
@@ -82,6 +88,51 @@ function lightExtensionArgs(list: string): string[] {
 	const guard = unguarded ? [] : guardExtension();
 	const listed = names.filter((name) => name !== `-${GUARD}`).map((name) => (/^[a-z]+:/.test(name) ? name : resolve(name)));
 	return ["--no-extensions", ...[extensionPath, ...guard, ...listed].flatMap((path) => ["--extension", path])];
+}
+
+/**
+ * Whether Pi knows `provider` with these extension flags. Pi tells only by its own start: `--help` loads the
+ * extensions, resolves `--provider`, and reports an unknown one on stderr. Undefined when Pi does not answer.
+ */
+function piKnowsProvider(extensionArgs: string[], provider: string, model: string, cwd: string): Promise<boolean | undefined> {
+	const args = [...extensionArgs, "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-mcp", "--provider", provider, "--model", model, "--help"];
+	// PI_SUBAGENT_NESTED: this extension, loaded by the probe, does nothing.
+	const env = { ...process.env, PI_SUBAGENT_NESTED: "1" };
+	return new Promise((resolveProbe) =>
+		execFile(process.env.PI_SUBAGENT_PI || "pi", args, { cwd, env, timeout: 30_000 }, (error, _stdout, stderr) => {
+			if (error) resolveProbe(undefined);
+			else resolveProbe(!stderr.includes(`Unknown provider "${provider}"`));
+		}),
+	);
+}
+
+/** Each extension Pi finds in its global `extensions` directory: a `.ts` or `.js` file, or a directory. */
+function globalExtensions(): string[] {
+	const dir = join(getAgentDir(), "extensions");
+	try {
+		return readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => !entry.name.startsWith(".") && entry.name !== "node_modules" && (entry.isDirectory() || /\.[jt]s$/.test(entry.name)))
+			.map((entry) => join(dir, entry.name));
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * The extension flag a light child also needs, so it knows its provider: none for a built-in one or one the
+ * listed extensions provide, else the first installed package or global extension that provides it. Pi keeps
+ * no record of which extension registered a provider, so each is asked, at the same time.
+ */
+async function providerExtensionArgs(lightArgs: string[], provider: string, model: string, cwd: string): Promise<string[]> {
+	// Pi did not answer: the child starts as asked, and its pane's last lines tell what failed.
+	if ((await piKnowsProvider(lightArgs, provider, model, cwd)) !== false) return [];
+	const candidates = [...installedPackages(), ...globalExtensions()].filter((path) => !lightArgs.includes(path));
+	const provided = await Promise.all(candidates.map((path) => piKnowsProvider(["--no-extensions", "--extension", path], provider, model, cwd)));
+	const found = candidates.find((_path, i) => provided[i]);
+	if (found) return ["--extension", found];
+	fail(
+		`Provider ${provider} is not built in and no installed extension provides it, so a light child cannot use it. Drop --no-extensions or --extensions, or pick a built-in provider with --provider.`,
+	);
 }
 
 function fail(message: string): never {
@@ -210,7 +261,7 @@ function applyAgent(args: string[]): { args: string[]; instructions?: string } {
 	return { args: [...roleArgs, ...rest], instructions: agent.body || undefined };
 }
 
-function spawnSubagent(callerArgs: string[]): void {
+async function spawnSubagent(callerArgs: string[]): Promise<void> {
 	if (process.env.PI_SUBAGENT_RUN_DIR || process.env.PI_SUBAGENT_NESTED) fail("Nested subagents are disabled");
 	const { args, instructions } = applyAgent(callerArgs);
 	let name: string | undefined;
@@ -314,10 +365,15 @@ function spawnSubagent(callerArgs: string[]): void {
 	if (tools !== undefined && !tools.split(",").some((name) => name.trim()))
 		fail("--tools requires at least one tool name");
 	if (noExtensions && extensions !== undefined) fail("Use --no-extensions or --extensions, not both");
-	const lightArgs = extensions === undefined ? [] : lightExtensionArgs(extensions);
+	const lightArgs = noExtensions
+		? ["--no-extensions", ...[extensionPath, ...guardExtension()].flatMap((path) => ["--extension", path])]
+		: extensions === undefined
+			? []
+			: lightExtensionArgs(extensions);
 	if (prompts.length === 0 && files.length === 0) fail("spawn requires at least one --prompt or --file");
 	if (!existsSync(cwd)) fail(`Working directory not found: ${cwd}`);
 	if (base !== undefined && worktree === undefined) fail("--base requires --worktree");
+	if (lightArgs.length > 0) lightArgs.push(...(await providerExtensionArgs(lightArgs, provider, model, cwd)));
 	if (worktree !== undefined) cwd = prepareWorktree(cwd, worktree, base);
 
 	const handle = generateHandle();
@@ -329,7 +385,6 @@ function spawnSubagent(callerArgs: string[]): void {
 
 	const launchArgs: string[] = [];
 	if (tools) launchArgs.push("--tools", tools);
-	if (noExtensions) launchArgs.push("--no-extensions", ...[extensionPath, ...guardExtension()].flatMap((path) => ["--extension", path]));
 	launchArgs.push(...lightArgs);
 	if (noMcp) launchArgs.push("--no-mcp");
 	if (noSkills) launchArgs.push("--no-skills");
@@ -592,7 +647,7 @@ async function main(): Promise<void> {
 	const command = args.shift();
 	switch (command) {
 		case "spawn":
-			spawnSubagent(args);
+			await spawnSubagent(args);
 			break;
 		case "status":
 			statusSubagent(args);

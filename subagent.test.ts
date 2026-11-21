@@ -68,6 +68,20 @@ afterEach(() => {
 });
 
 /**
+ * `pi --help`, as `spawn` asks it whether a light child knows its provider: `test` and `anthropic` are
+ * built in; an extension directory provides the provider named in its file `provides`. Pi reports an unknown
+ * provider on stderr, and exits 0.
+ */
+const fakeHelp = `if (process.argv.includes("--help")) {
+	const argv = process.argv;
+	const provider = argv[argv.indexOf("--provider") + 1];
+	const provides = (dir) => { try { return [require("node:fs").readFileSync(dir + "/provides", "utf8").trim()]; } catch { return []; } };
+	const known = ["test", "anthropic", ...argv.flatMap((arg, i) => (argv[i - 1] === "--extension" ? provides(arg) : []))];
+	if (!known.includes(provider)) process.stderr.write('Error: Unknown provider "' + provider + '". Use --list-models to see available providers/models.\\n');
+	process.exit(0);
+}`;
+
+/**
  * Write an executable `pi` that records what it received and, like a real child, holds its FIFO and records
  * its process ID through `updateMetadata`, then stays alive.
  */
@@ -77,7 +91,7 @@ function fakePi(dir: string): string {
 	writeFileSync(
 		script,
 		// Node, like pi: a shell would reset PWD itself and hide what the launcher passed.
-		`#!${process.execPath}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst { updateMetadata } = require(${JSON.stringify(join(import.meta.dirname, "shared.ts"))});\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nupdateMetadata(process.env.PI_SUBAGENT_RUN_DIR, { childPid: process.pid });\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
+		`#!${process.execPath}\n${fakeHelp}\nconst { join } = require("node:path");\nconst fs = require("node:fs");\nconst { updateMetadata } = require(${JSON.stringify(join(import.meta.dirname, "shared.ts"))});\nconst fifo = join(process.env.PI_SUBAGENT_RUN_DIR, "alive");\nif (!fs.existsSync(fifo)) require("node:child_process").spawnSync("mkfifo", [fifo]);\nfs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);\nupdateMetadata(process.env.PI_SUBAGENT_RUN_DIR, { childPid: process.pid });\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "argv"), JSON.stringify(process.argv.slice(2)));\nrequire("node:fs").writeFileSync(join(process.env.PI_SUBAGENT_RUN_DIR, "probe"), Object.entries(process.env).map(([k, v]) => k + "=" + v).join("\\n") + "\\n");\nsetInterval(() => {}, 1000);\n`,
 	);
 	chmodSync(script, 0o755);
 	return dir;
@@ -802,6 +816,74 @@ test("the subagent tool refuses -cc-safety-net unless the user set PI_SUBAGENT_A
 		assert.equal(result.isError, false, result.text);
 	});
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
+
+/** A package, listed in Pi's `packages` as a local path, that registers `provider`. */
+function installProviderPackage(provider: string): string {
+	const pkg = join(root, "checkouts", `${provider}-pkg`);
+	mkdirSync(pkg, { recursive: true });
+	writeFileSync(join(pkg, "provides"), provider);
+	mkdirSync(agentDir(), { recursive: true });
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["../checkouts/other-pkg", pkg] }));
+	mkdirSync(join(root, "checkouts", "other-pkg"), { recursive: true });
+	return pkg;
+}
+
+test("spawn --no-extensions with an extension provider passes that provider's package to the child", async () => {
+	const pkg = installProviderPackage("extprov");
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		PI_PROVIDER: "extprov",
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	const args = await childArgs(agentDir());
+	assert.ok(args.includes("--no-extensions"));
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), pkg]);
+});
+
+test("spawn --extensions with a built-in provider adds no provider package", async () => {
+	installProviderPackage("extprov");
+
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+});
+
+test("spawn --no-extensions fails at once, naming the provider, when no installed package provides it", () => {
+	installProviderPackage("extprov");
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		PI_PROVIDER: "nowhere",
+	});
+
+	assert.equal(result.status, 1);
+	assert.equal(
+		result.stderr.split("\n").at(-2) + "\n",
+		"Provider nowhere is not built in and no installed extension provides it, so a light child cannot use it. Drop --no-extensions or --extensions, or pick a built-in provider with --provider.\n",
+	);
+	assert.deepEqual(listRuns(), []);
+});
+
+test("a child whose Pi exits at start is reported with its error text, before its grace time ends", async () => {
+	const bin = join(root, "failing-bin");
+	mkdirSync(bin);
+	writeFileSync(join(bin, "pi"), `#!/bin/sh\necho 'Error: Unknown provider "test". Use --list-models to see available providers/models.' >&2\nexit 1\n`, { mode: 0o755 });
+	const result = runCli(["spawn", "--cwd", root, "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), PI_SESSION_ID: "parent" });
+	assert.equal(result.status, 0, result.stderr);
+	const [run] = listRuns("parent");
+
+	let pending: ReturnType<typeof pendingResults>;
+	for (const deadline = Date.now() + 10_000; !pending && Date.now() < deadline; await new Promise((resolveDelay) => setTimeout(resolveDelay, 200))) {
+		reportExitedRuns(listRuns("parent"));
+		pending = pendingResults([run]);
+	}
+
+	assert.match(pending?.text ?? "", new RegExp(`^Subagent ${run.handle} exited\\n\\nIts process ended before it started\\. Its last lines:\\n\\nError: Unknown provider "test"\\. Use --list-models to see available providers/models\\.\\n`));
+	assert.equal(tmuxSessionExists(run.tmuxSession), false);
 });
 
 test("the subagent tool with noExtensions starts a child that loads this extension and the command guard", async () => {
