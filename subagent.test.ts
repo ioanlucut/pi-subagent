@@ -308,6 +308,79 @@ test("a resumed child is starting, not exited, before its new process records it
 	assert.equal(effectiveRunState(listRuns()[0]), "starting");
 });
 
+/** A transcript line: a message of `role` with `text`. */
+function transcriptMessage(id: string, parentId: string | null, role: "user" | "assistant", text: string): string {
+	return `${JSON.stringify({ type: "message", id, parentId, message: { role, content: [{ type: "text", text }], ...(role === "assistant" && { stopReason: "stop" }) } })}\n`;
+}
+
+/** Quit the parent session with `run` in `state`, resume the session, and return the arguments after `--` of the relaunched child. */
+async function quitAndResume(run: RunMetadata, state: "idle" | "busy"): Promise<string[]> {
+	await startedChild(run);
+	updateMetadata(run.runDir, { state });
+	await suspendSessionRuns("parent");
+	for (const file of ["argv", "probe"]) rmSync(join(run.runDir, file));
+	await withEnv({ PATH: `${join(root, "bin")}:${basePath}` }, async () => {
+		resumeSuspendedRuns("parent", (_run, error) => assert.fail(error));
+		await settleTmuxCalls();
+	});
+	await startedChild(run);
+	const args = JSON.parse(readFileSync(join(run.runDir, "argv"), "utf8")) as string[];
+	return args.slice(args.indexOf("--") + 1);
+}
+
+/** The child ends a turn with `answer`, as Pi does, and returns the results the parent then has. */
+function endTurn(run: RunMetadata, answer: string): string[] {
+	writeFileSync(run.sessionFile, transcriptMessage("a9", null, "assistant", answer), { flag: "a" });
+	reportSettledTurn(run.runDir);
+	return readdirSync(join(run.runDir, "outbox")).map((file) => readFileSync(join(run.runDir, "outbox", file), "utf8"));
+}
+
+test("a child busy at quit is resumed with the continue message, and the parent gets one result for it", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent", PI_SUBAGENT_NOTIFY: "1" }, ["--timeout", "1h"]);
+	const [run] = listRuns();
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nhi"));
+	updateMetadata(run.runDir, { hasStarted: true, deadline: new Date(Date.now() - 1000).toISOString() });
+
+	const args = await quitAndResume(run, "busy");
+
+	assert.deepEqual(args, ["Your previous turn was stopped because the parent Pi quit. Continue the task where you stopped, then give your answer."]);
+	assert.ok(Date.parse(readMetadata(run.runDir)!.deadline!) > Date.now() + 59 * 60_000, "the time limit counts from the resumed launch");
+	const results = endTurn(run, "Done.");
+	assert.equal(results.length, 1);
+	assert.match(results[0], /^Subagent \w+ finished\n\nDone\./);
+});
+
+test("a quit before the child saved its first prompt resumes it with that prompt, and the parent gets one result", async () => {
+	const notes = join(root, "notes.md");
+	writeFileSync(notes, "notes");
+	agentFile(join(agentDir(), "agents"), "reviewer", [], "Be short.\n");
+	const result = runCli(["spawn", "--cwd", root, "--agent", "reviewer", "--file", notes, "--prompt", "review"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		PI_SESSION_ID: "parent",
+	});
+	assert.equal(result.status, 0, result.stderr);
+	const [run] = listRuns();
+
+	// Idle, as Pi reports at its session start, before the first prompt reaches the transcript.
+	const args = await quitAndResume(run, "idle");
+
+	assert.deepEqual(args, [`@${notes}`, "Instructions:\nBe short.\n\nTask:\nreview"]);
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nreview"));
+	assert.equal(endTurn(run, "Reviewed.").length, 1);
+});
+
+test("a child idle at quit resumes idle, with no message and no result", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nhi") + transcriptMessage("a1", "u1", "assistant", "Done."));
+	updateMetadata(run.runDir, { hasStarted: true });
+
+	const args = await quitAndResume(run, "idle");
+
+	assert.deepEqual(args, []);
+	assert.equal(pendingResults(listRuns()), undefined);
+});
+
 test("suspendOrphanedRuns treats a reused parent process ID as a dead parent", async () => {
 	// This test process is alive, but it is not the process that spawned the child: its start time differs.
 	spawnChildren(1, { PI_SUBAGENT_PARENT_PID: String(process.pid), PI_SUBAGENT_PARENT_STARTED: "Thu Jan  1 00:00:00 1970" });

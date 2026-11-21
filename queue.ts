@@ -14,6 +14,7 @@ import {
 	prepareLaunch,
 	readMetadata,
 	removeRunDir,
+	resumeArgs,
 	runDisplayName,
 	type RunMetadata,
 	skippingBusyRun,
@@ -262,9 +263,9 @@ const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
  * second launch would fail on the tmux session and mark the live run `error`.
  */
 export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting", patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
-	// A child that never started still has the launch `spawn` saved, with its first prompt. The launch first:
-	// from the `queued` write on, a parent tick can start the run.
-	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run);
+	// A child that never started still has the launch `spawn` saved, with its first prompt. A started one gets
+	// the work its suspend cut. The launch first: from the `queued` write on, a parent tick can start the run.
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run, resumeArgs(run));
 	let claimed = false;
 	const next = updateMetadata(run.runDir, (current) => {
 		// Claimed: `queued`, or `starting` with no process yet. Past the grace time, its claimer died before the launch.

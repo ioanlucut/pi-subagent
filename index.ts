@@ -7,6 +7,7 @@ import { InboxDelivery } from "./inbox.ts";
 import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
+	dropFirstPrompt,
 	guarded,
 	effectiveRunState,
 	holdAliveFifo,
@@ -277,7 +278,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		// A turn from idle that the inbox did not start (typed in the pane): its time limit counts from now.
 		updateMetadata(runDir, (metadata) => {
 			const deadline = metadata.state === "idle" ? nextDeadline(metadata) : undefined;
-			return { state: "busy", hasStarted: true, error: undefined, ...(deadline && { deadline }) };
+			// The work a suspend cut is begun again, so a later suspend judges the turn by itself.
+			return { state: "busy", hasStarted: true, error: undefined, cutWork: undefined, ...(deadline && { deadline }) };
 		});
 	});
 
@@ -286,6 +288,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		if (!ctx.isIdle()) return;
 		// The result first: a `stop` that sees `idle` then finds it, and prints it.
 		reportSettledTurn(runDir);
+		dropFirstPrompt(runDir);
 		updateMetadata(runDir, { state: "idle" });
 	});
 

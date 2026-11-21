@@ -179,6 +179,11 @@ const suites: [string, string[], string[]][] = [
 		"a child spawned with the subagent tool is suspended and resumed like a CLI child",
 		"the bundled skill names the subagent tool first and the CLI second",
 	]],
+	["#52", ["subagent.test.ts"], [
+		"a child busy at quit is resumed with the continue message, and the parent gets one result for it",
+		"a quit before the child saved its first prompt resumes it with that prompt, and the parent gets one result",
+		"a child idle at quit resumes idle, with no message and no result",
+	]],
 ];
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 for (const [ticket, files, names] of suites) {
