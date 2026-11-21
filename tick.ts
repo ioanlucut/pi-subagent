@@ -1,7 +1,8 @@
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { forgetDeliveredResults, hasResults, isExitKnown, reportExitedRuns, takeResultsToSend } from "./outbox.ts";
-import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { awaitsDeadline, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { actsAsParent, effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { reportStuckStarts } from "./start-check.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;
@@ -54,12 +55,15 @@ export class SessionTick {
 		const runs = startQueuedRuns(listRuns(sessionId()), onStartError ?? (() => {}));
 		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
 		stopTimedOutRuns(runs);
+		reportStuckStarts(runs);
 		// A launch that failed was reported, and no child runs: its row would keep the tick for nothing.
 		const rows = runs
 			.map((run) => ({ run, state: effectiveRunState(run) }))
 			.filter(({ run, state }) => state !== "exited" && !(state === "error" && isExitKnown(run.runDir)));
 		show?.(rows);
-		if (!deliver) return rows.length > 0;
+		// A child reported `exited` that may still run in tmux keeps the tick for its time limit.
+		const deadlines = runs.some(awaitsDeadline);
+		if (!deliver) return rows.length > 0 || deadlines;
 		const ready = deliver.ready();
 		// Another Pi on the session shows its runs, but only the run's owner sends their results.
 		const owned = runs.filter((run) => actsAsParent(run, { exact: false }));
@@ -72,6 +76,6 @@ export class SessionTick {
 		forgetDeliveredResults(owned, deliver.delivered);
 		// Results that wait for Pi keep the tick until they are in the session.
 		if (!ready) return runs.length > 0;
-		return rows.length > 0 || inGrace || hasResults(owned);
+		return rows.length > 0 || inGrace || deadlines || hasResults(owned);
 	}
 }

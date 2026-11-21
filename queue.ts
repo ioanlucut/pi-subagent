@@ -170,7 +170,7 @@ function errorText(error: unknown): string {
 const pendingTmuxCalls = new Set<Promise<void>>();
 
 /** Keep `call` until it ends. An error is logged: a rejection nobody handles would end Pi. */
-function track(call: Promise<void>): void {
+export function track(call: Promise<void>): void {
 	const settled = call
 		.catch((error: unknown) => console.error(`pi-subagent: a tmux call failed: ${error instanceof Error ? error.stack : String(error)}`))
 		.finally(() => pendingTmuxCalls.delete(settled));
@@ -278,6 +278,12 @@ export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting"
 			error: undefined,
 			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
 			childPid: null,
+			// The new process reports its own start.
+			sessionStartedAt: undefined,
+			promptAccepted: undefined,
+			waitsForTrust: undefined,
+			trustReported: undefined,
+			failedToStart: undefined,
 		};
 	});
 	if (!next || !claimed) return undefined;
@@ -308,9 +314,13 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 }
 
 /**
- * The parent tick and `wait` call this: a child still working (`starting` or `busy`) past its deadline is
- * stopped and reported once as `timed out`. An idle child has answered, so it stays; a prompt that starts
- * its next turn sets a new deadline. The run directory stays, so its transcript can show where the child was stuck.
+ * The parent tick and `wait` call this: a child that has not answered yet (`starting`, `busy`, or `idle`
+ * before its first turn) past its deadline is stopped and reported once as `timed out`. An idle child that
+ * answered stays; a prompt that starts its next turn sets a new deadline. The run directory stays, so its
+ * transcript can show where the child was stuck.
+ *
+ * A child that has not recorded its process ID past its grace time was reported `exited`, but its Pi can
+ * still run in tmux (a slow start): it is ended too, with no second message.
  *
  * `runs` can be older than the run: a child can go idle after the listing. So the listing only picks the
  * candidates; the decision is made again on the run as it is under its lock.
@@ -318,7 +328,10 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
 export function stopTimedOutRuns(runs: RunMetadata[]): void {
 	for (const listed of runs) {
 		if (!isPastLimit(listed)) continue;
-		if (isExitKnown(listed.runDir) || effectiveRunState(listed) === "exited") continue;
+		// Its process ended: nothing to stop. One with no process ID yet can still run in tmux.
+		if (listed.childPid !== null && effectiveRunState(listed) === "exited") continue;
+		// Already reported (`exited`, `failed to start`): it is ended with no second message.
+		const reported = isExitKnown(listed.runDir);
 		let stopped = false;
 		let run: RunMetadata | undefined;
 		try {
@@ -337,14 +350,26 @@ export function stopTimedOutRuns(runs: RunMetadata[]): void {
 		// In a child process, as the tick runs on Pi's UI thread. The result is written now: `wait` prints and
 		// clears it at once, and a result written after that would reach the parent a second time.
 		track(new Promise((resolveKill) => execFile("tmux", ["kill-session", "-t", run.tmuxSession], () => resolveKill())));
-		writeResult(run, "timed out", timedOutText(run));
+		if (!reported) writeResult(run, "timed out", timedOutText(run));
 	}
 }
 
-/** Still working (`starting` or `busy`) past its deadline, and not yet stopped or suspended. */
+/** Has not answered yet (`starting`, `busy`, or `idle` before its first turn) past its deadline, and not yet stopped or suspended. */
 function isPastLimit(run: RunMetadata): boolean {
-	if (run.state !== "starting" && run.state !== "busy") return false;
+	if (!hasNotAnswered(run)) return false;
 	return !!run.deadline && !run.timedOut && !run.suspended && Date.now() >= Date.parse(run.deadline);
+}
+
+function hasNotAnswered(run: RunMetadata): boolean {
+	return run.state === "starting" || run.state === "busy" || (run.state === "idle" && !run.hasStarted);
+}
+
+/**
+ * Whether the tick must stay for the time limit of `run`: it has not recorded its process ID, so past its
+ * grace time it is reported `exited` and shown nowhere, but its Pi can still run in tmux until its deadline.
+ */
+export function awaitsDeadline(run: RunMetadata): boolean {
+	return run.state === "starting" && run.childPid === null && !!run.deadline && !run.timedOut && !run.suspended;
 }
 
 export function timedOutText(run: RunMetadata): string {

@@ -17,6 +17,7 @@ import {
 	nextDeadline,
 	pruneStaleRuns,
 	readMetadata,
+	recordTrustPrompt,
 	runDisplayName,
 	suspendOrphanedRuns,
 	suspendSessionRuns,
@@ -263,6 +264,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		});
 	});
 
+	// Pi fires this before it asks whether to trust the project folder. The user decides, so the answer is left to
+	// Pi; the parent learns that the child waits. A decision Pi finds saved starts the session at once, and clears it.
+	pi.on("project_trust", (event, ctx) => {
+		if (ctx.hasUI) recordTrustPrompt(runDir, event.cwd);
+		return { trusted: "undecided" };
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		currentContext = ctx;
 		const metadata = readMetadata(runDir);
@@ -272,6 +280,10 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		updateMetadata(runDir, {
 			childSessionId: ctx.sessionManager.getSessionId(),
 			childPid: process.pid,
+			sessionStartedAt: new Date().toISOString(),
+			promptAccepted: undefined,
+			waitsForTrust: undefined,
+			trustReported: undefined,
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: ctx.isIdle() ? "idle" : "busy",
 			suspended: undefined,
@@ -283,6 +295,11 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			timer.unref();
 		}
 		processInbox();
+	});
+
+	// Pi checks the model and its login before this; MCP servers can then hold the turn's start for 10 s.
+	pi.on("before_agent_start", () => {
+		updateMetadata(runDir, (metadata) => (metadata.hasStarted || metadata.promptAccepted ? undefined : { promptAccepted: true }));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

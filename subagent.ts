@@ -8,7 +8,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listAgents } from "./agents.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting, returnResults, takeResults } from "./outbox.ts";
-import { resumeRun, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
+import { resumeRun, settleTmuxCalls, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
+import { reportStuckStarts } from "./start-check.ts";
 import {
 	assistantText,
 	getAgentDir,
@@ -523,8 +524,10 @@ async function waitSubagent(args: string[]): Promise<void> {
 	while (Date.now() < deadline) {
 		let metadata = getRun(handle);
 		markWaiting(metadata.runDir);
-		// Outside a Pi parent no tick enforces the limit, so `wait` does.
+		// Outside a Pi parent no tick enforces the limit or ends a child whose first prompt failed, so `wait` does.
 		stopTimedOutRuns([metadata]);
+		reportStuckStarts([metadata]);
+		await settleTmuxCalls();
 		metadata = getRun(handle);
 		if (metadata.timedOut) {
 			process.stdout.write(`${handle} timed out\n\n${timedOutText(metadata)}\n`);
@@ -534,7 +537,7 @@ async function waitSubagent(args: string[]): Promise<void> {
 		}
 		const pending = inboxHasMessages(metadata.runDir);
 		const state = effectiveRunState(metadata);
-		// A queued launch that failed: the tick sent it as a result, which this prints instead.
+		// A launch that failed, or a first prompt Pi rejected: the tick sent it as a result, which this prints instead.
 		if (state === "error" && isExitKnown(metadata.runDir)) {
 			process.stdout.write(`${handle} failed to start\n\n${metadata.error ?? ""}\n`);
 			process.exitCode = 1;

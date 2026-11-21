@@ -64,6 +64,16 @@ export interface RunMetadata {
 	 * parent gets a result; with none it resumes idle.
 	 */
 	cutWork?: "first-prompt" | "continue";
+	/** When the child's session started, written by the child: a first prompt that Pi has not accepted 15 s later failed. */
+	sessionStartedAt?: string;
+	/** Set by the child when Pi accepted its first prompt (`before_agent_start`): extensions may still hold the turn's start. */
+	promptAccepted?: boolean;
+	/** Written by the child when its Pi asks whether to trust `cwd`, before its session starts; cleared when it starts. */
+	waitsForTrust?: { cwd: string; since: string };
+	/** Set by the parent when it told the parent session about `waitsForTrust`, so it does so once. */
+	trustReported?: boolean;
+	/** Set by the parent when it stops a child whose first prompt never became a turn. */
+	failedToStart?: boolean;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -370,6 +380,11 @@ export function saveFirstPrompt(runDir: string, initialArgs: string[]): void {
 	writeFileSync(firstPromptPath(runDir), JSON.stringify(initialArgs), { encoding: "utf8", mode: 0o600 });
 }
 
+/** Whether the run has a first prompt that no turn has ended yet: kept from `spawn`, dropped when a turn ends. */
+export function hasFirstPrompt(runDir: string): boolean {
+	return existsSync(firstPromptPath(runDir));
+}
+
 /** The child calls this when a turn ends: its transcript now holds the first prompt. */
 export function dropFirstPrompt(runDir: string): void {
 	rmSync(firstPromptPath(runDir), { force: true });
@@ -505,6 +520,16 @@ export function openAliveFifo(runDir: string): number {
 	// Node has no mkfifo. The child runs this once at its start, never the parent's tick.
 	if (!existsSync(path)) spawnSync("mkfifo", ["-m", "600", path], { stdio: "ignore" });
 	return openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+}
+
+/**
+ * The child calls this when its Pi asks whether to trust `cwd`: Pi waits for an answer before the session
+ * starts, so the child records its process ID now. Else the parent would report it `exited` after its grace
+ * time, free its slot, and skip its time limit, while it still waits in its pane.
+ */
+export function recordTrustPrompt(runDir: string, cwd: string): void {
+	holdAliveFifo(runDir);
+	updateMetadata(runDir, { childPid: process.pid, waitsForTrust: { cwd, since: new Date().toISOString() }, trustReported: undefined });
 }
 
 /** The child calls this before it records its process ID, so the parent never sees an ID with no FIFO holder. */
