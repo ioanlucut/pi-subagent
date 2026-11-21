@@ -2,7 +2,7 @@ import { rmSync } from "node:fs";
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { hasResults, isExitKnown, reportExitedRuns, returnResults, takeResults } from "./outbox.ts";
 import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
-import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { actsAsParent, effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;
@@ -59,8 +59,10 @@ export class SessionTick {
 		if (!deliver) return rows.length > 0;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
-		const inGrace = reportExitedRuns(runs);
-		const taken = takeResults(runs);
+		// Another Pi on the session shows its runs, but only the run's owner sends their results.
+		const owned = runs.filter((run) => actsAsParent(run, { exact: false }));
+		const inGrace = reportExitedRuns(owned);
+		const taken = takeResults(owned);
 		if (taken) {
 			try {
 				deliver.send(taken.text);
@@ -70,6 +72,6 @@ export class SessionTick {
 			}
 			for (const file of taken.files) rmSync(file, { force: true });
 		}
-		return rows.length > 0 || inGrace || hasResults(runs);
+		return rows.length > 0 || inGrace || hasResults(owned);
 	}
 }
