@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
+	awaitsLaunchTurn,
 	effectiveRunState,
 	getAgentDir,
 	inStartingGrace,
@@ -361,7 +362,7 @@ function isPastLimit(run: RunMetadata): boolean {
 }
 
 function hasNotAnswered(run: RunMetadata): boolean {
-	return run.state === "starting" || run.state === "busy" || (run.state === "idle" && !run.hasStarted);
+	return run.state === "starting" || run.state === "busy" || (run.state === "idle" && awaitsLaunchTurn(run));
 }
 
 /**

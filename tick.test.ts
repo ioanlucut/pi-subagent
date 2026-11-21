@@ -521,6 +521,47 @@ test("a child idle before its first turn 15 s after its session started is stopp
 	assert.deepEqual(shown.at(-1), [{ handle: "bbb222", state: "starting" }]);
 });
 
+test("a resumed child whose continue message never starts a turn is stopped and reported failed to start once, with Pi's error", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	screenTmux(NO_LOGIN_SCREEN);
+	const { tick, sent } = parentTick();
+	// Resumed after a quit cut its turn: it started a turn in an earlier launch, but not in this one.
+	const { run } = liveRun("aaa111", { state: "idle", hasStarted: true, cutWork: "continue", sessionStartedAt: new Date().toISOString() });
+
+	tick.wake();
+	mock.timers.tick(14_000);
+	await settleTmuxCalls();
+	assert.deepEqual(tmuxCalls(), [], "not before 15 s");
+
+	for (let i = 0; i < 5; i++) {
+		mock.timers.tick(1000);
+		await settleTmuxCalls();
+	}
+
+	assert.deepEqual(sent, [
+		"Subagent aaa111 failed to start\n\nIts Pi did not start the continue message within 15 s, so it was stopped. Its screen ended with:\n" +
+			"Error: No API key found for anthropic.\nUse /login to log into a provider via OAuth or API key. See:\n/pi/docs/providers.md\n/pi/docs/models.md",
+	]);
+	assert.deepEqual(tmuxCalls(), ["capture-pane -p -J -t pi-subagent-aaa111", "kill-session -t pi-subagent-aaa111"]);
+	assert.equal(readMetadata(run.runDir)?.state, "error");
+});
+
+test("a resumed child idle before the turn of its launch is stopped at its deadline and reported timed out", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	const { tick, sent } = parentTick();
+	liveRun("aaa111", { state: "idle", hasStarted: true, cutWork: "continue", sessionStartedAt: new Date().toISOString(), timeout: "10s", deadline: new Date(Date.now() + 10_000).toISOString() });
+
+	tick.wake();
+	mock.timers.tick(11_000);
+	await settleTmuxCalls();
+
+	assert.deepEqual(tmuxCalls(), ["kill-session -t pi-subagent-aaa111"]);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0], /^Subagent aaa111 timed out\n/);
+});
+
 test("a child whose Pi asks whether to trust the project is reported as waiting for trust, not exited, and keeps its slot", async () => {
 	const { run } = liveRun("aaa111", { state: "starting", childPid: null });
 	children.pop()?.kill("SIGKILL");

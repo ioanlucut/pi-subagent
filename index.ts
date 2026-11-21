@@ -6,6 +6,7 @@ import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendi
 import { InboxDelivery } from "./inbox.ts";
 import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
 import {
+	awaitsLaunchTurn,
 	claimRunDir,
 	dropFirstPrompt,
 	guarded,
@@ -299,7 +300,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	// Pi checks the model and its login before this; MCP servers can then hold the turn's start for 10 s.
 	pi.on("before_agent_start", () => {
-		updateMetadata(runDir, (metadata) => (metadata.hasStarted || metadata.promptAccepted ? undefined : { promptAccepted: true }));
+		updateMetadata(runDir, (metadata) => (!awaitsLaunchTurn(metadata) || metadata.promptAccepted ? undefined : { promptAccepted: true }));
 	});
 
 	pi.on("agent_start", (_event, ctx) => {

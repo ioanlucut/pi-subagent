@@ -684,6 +684,14 @@ function cutWork(run: RunMetadata): RunMetadata["cutWork"] {
 	return run.cutWork;
 }
 
+/**
+ * Whether the turn of this launch has not begun: a new child before its first turn, or a resumed one with the
+ * work its suspend cut. `hasStarted` alone holds for the child's lifetime, so it says nothing of a resumed launch.
+ */
+export function awaitsLaunchTurn(run: RunMetadata): boolean {
+	return !run.hasStarted || run.cutWork !== undefined;
+}
+
 /** Whether the transcript has a user message: Pi writes the first prompt after `agent_start` sets `hasStarted`. */
 function hasUserMessage(sessionFile: string): boolean {
 	try {

@@ -514,6 +514,18 @@ test("wait reports a completed turn as finished", () => {
 	assert.equal(result.stdout, "abc123 finished\n\nAll good.\n");
 });
 
+test("wait on a resumed child that never starts its continue message reports failed to start, not its old answer", () => {
+	const handle = idleRun({ content: [{ type: "text", text: "Old answer." }], stopReason: "stop" });
+	// Resumed after a quit cut its turn; its session started 10 s ago, and the continue message has not started a turn.
+	const runDir = join(agentDir(), "subagents", handle);
+	updateMetadata(runDir, { cutWork: "continue", sessionStartedAt: new Date(Date.now() - 10_000).toISOString() });
+
+	const result = runCli(["wait", handle], {});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /^abc123 failed to start\n\nIts Pi did not start the continue message within 15 s, so it was stopped\./);
+});
+
 /** A run directory with no live child, last updated `ageDays` ago. */
 function storedRun(handle: string, ageDays: number, tmuxSession = `pi-subagent-${handle}`): string {
 	const runDir = join(agentDir(), "subagents", handle);

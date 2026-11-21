@@ -12,6 +12,7 @@ import { resumeRun, settleTmuxCalls, startRun, stateLine, stopTimedOutRuns, time
 import { reportStuckStarts } from "./start-check.ts";
 import {
 	assistantText,
+	awaitsLaunchTurn,
 	getAgentDir,
 	effectiveRunState,
 	getRunsDir,
@@ -546,7 +547,8 @@ async function waitSubagent(args: string[]): Promise<void> {
 		}
 		if (state === "error") fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
-		if (metadata.hasStarted && state === "idle" && !pending) {
+		// A resumed child idle before the turn of its launch has not answered it: its transcript holds an older answer.
+		if (!awaitsLaunchTurn(metadata) && state === "idle" && !pending) {
 			const message = readLatestAssistant(metadata.sessionFile);
 			if (!message) fail(`${handle} finished without an assistant response`);
 			const outcome = turnOutcome(message);
