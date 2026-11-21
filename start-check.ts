@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { LockBusyError } from "./lock.ts";
 import { isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import { track } from "./queue.ts";
-import { effectiveRunState, hasFirstPrompt, type RunMetadata, updateMetadata } from "./shared.ts";
+import { awaitsLaunchTurn, effectiveRunState, hasFirstPrompt, type RunMetadata, updateMetadata } from "./shared.ts";
 
 /** Pi accepts the first prompt right after its session starts; one it has not accepted by then was rejected. */
 export const FIRST_PROMPT_MS = 15_000;
@@ -10,9 +10,10 @@ export const FIRST_PROMPT_MS = 15_000;
 /**
  * The parent tick and `wait` call this for children whose start is stuck, so the parent hears of each once:
  *
- * - Idle with its first prompt not accepted 15 s after its session started (Pi rejected it: no login, no such
- *   model). It is stopped, and reported `failed to start` with the end of its screen, which shows Pi's error.
- *   Its slot is free once it is stopped.
+ * - Idle with the prompt of its launch not accepted 15 s after its session started (Pi rejected it: no login,
+ *   no such model). That is the first prompt, or for a resumed child the work its suspend cut. It is stopped,
+ *   and reported `failed to start` with the end of its screen, which shows Pi's error. Its slot is free once
+ *   it is stopped.
  * - At Pi's trust prompt for 15 s. The user decides trust, so it waits, keeps its slot, and its time limit
  *   holds; the parent is told where to answer.
  *
@@ -27,9 +28,9 @@ export function reportStuckStarts(runs: RunMetadata[], now = Date.now()): void {
 }
 
 function isRejectedFirstPrompt(run: RunMetadata, now: number): boolean {
-	if (run.state !== "idle" || run.hasStarted || run.promptAccepted || run.timedOut || run.failedToStart || !run.sessionStartedAt) return false;
+	if (run.state !== "idle" || !awaitsLaunchTurn(run) || run.promptAccepted || run.timedOut || run.failedToStart || !run.sessionStartedAt) return false;
 	// A child resumed with no work to do is idle by design.
-	return now - Date.parse(run.sessionStartedAt) >= FIRST_PROMPT_MS && hasFirstPrompt(run.runDir);
+	return now - Date.parse(run.sessionStartedAt) >= FIRST_PROMPT_MS && (run.cutWork === "continue" || hasFirstPrompt(run.runDir));
 }
 
 function isWaitingForTrust(run: RunMetadata, now: number): boolean {
@@ -62,7 +63,8 @@ function failStart(listed: RunMetadata, now: number): void {
 			const screen = await tmux(["capture-pane", "-p", "-J", "-t", run.tmuxSession]);
 			await tmux(["kill-session", "-t", run.tmuxSession]);
 			const reason = screenError(screen);
-			const text = `Its Pi did not start its first prompt within ${FIRST_PROMPT_MS / 1000} s, so it was stopped.${reason ? ` Its screen ended with:\n${reason}` : ""}`;
+			const work = run.cutWork === "continue" ? "the continue message" : "its first prompt";
+			const text = `Its Pi did not start ${work} within ${FIRST_PROMPT_MS / 1000} s, so it was stopped.${reason ? ` Its screen ended with:\n${reason}` : ""}`;
 			// The result first: a `wait` that sees `error` prints it and clears it, so the parent gets it once.
 			writeResult(run, "failed to start", text);
 			updateMetadata(run.runDir, { state: "error", error: text });
