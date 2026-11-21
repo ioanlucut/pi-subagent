@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
-import { InboxDelivery } from "./inbox.ts";
+import { forgetSavedMessages, InboxDelivery } from "./inbox.ts";
 import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
 import {
 	claimRunDir,
@@ -319,6 +319,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		// The result first: a `stop` that sees `idle` then finds it, and prints it.
 		reportSettledTurn(runDir);
 		dropFirstPrompt(runDir);
+		const sessionFile = readMetadata(runDir)?.sessionFile;
+		if (sessionFile) forgetSavedMessages(runDir, sessionFile);
 		updateMetadata(runDir, { state: "idle" });
 	});
 

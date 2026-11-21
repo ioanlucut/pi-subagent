@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { unsavedMessages } from "./inbox.ts";
 import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
@@ -265,7 +266,8 @@ const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
 export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting", patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
 	// A child that never started still has the launch `spawn` saved, with its first prompt. A started one gets
 	// the work its suspend cut. The launch first: from the `queued` write on, a parent tick can start the run.
-	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run, resumeArgs(run));
+	// Then the messages Pi held in memory when the quit came.
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run, [...resumeArgs(run), ...unsavedMessages(run.runDir, run.sessionFile)]);
 	let claimed = false;
 	const next = updateMetadata(run.runDir, (current) => {
 		// Claimed: `queued`, or `starting` with no process yet. Past the grace time, its claimer died before the launch.

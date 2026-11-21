@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { forgetSavedMessages, InboxDelivery } from "./inbox.ts";
 import { resumeSuspendedRuns, settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
 import {
@@ -421,6 +422,49 @@ test("a quit before the child saved its first prompt resumes it with that prompt
 	assert.deepEqual(args, [`@${notes}`, "Instructions:\nBe short.\n\nTask:\nreview"]);
 	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nreview"));
 	assert.equal(endTurn(run, "Reviewed.").length, 1);
+});
+
+/** A busy child with a task in its transcript gets `message` by `send --follow-up` and hands it to Pi, which holds it in memory. */
+async function followUpHanded(message: string): Promise<RunMetadata> {
+	spawnChildren(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	await startedChild(run);
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nhi"));
+	updateMetadata(run.runDir, { hasStarted: true, state: "busy" });
+	assert.equal(runCli(["send", run.handle, "--follow-up", message], spawnEnv(agentDir(), join(root, "bin"))).status, 0);
+	new InboxDelivery(run.runDir).deliver({ isIdle: () => false, send: () => {}, abort: () => {} });
+	return run;
+}
+
+const CONTINUE = "Your previous turn was stopped because the parent Pi quit. Continue the task where you stopped, then give your answer.";
+
+test("a follow-up queued while busy, then quit and resume, is delivered once, after the continue message", async () => {
+	const run = await followUpHanded("Also check the docs");
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE, "Also check the docs"]);
+
+	// The resumed child saves it and settles; a later quit and resume does not send it again.
+	writeFileSync(run.sessionFile, transcriptMessage("u2", "u1", "user", "Also check the docs"), { flag: "a" });
+	forgetSavedMessages(run.runDir, run.sessionFile);
+	updateMetadata(run.runDir, { cutWork: undefined });
+	assert.deepEqual(await quitAndResume(run, "idle"), []);
+	assert.deepEqual(readdirSync(join(run.runDir, "inbox")), []);
+});
+
+test("a follow-up that reached the transcript is not sent again after resume", async () => {
+	const run = await followUpHanded("Also check the docs");
+	// Pi started the follow-up's turn and saved it; the quit came before the turn settled.
+	writeFileSync(run.sessionFile, transcriptMessage("u2", "u1", "user", "Also check the docs"), { flag: "a" });
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE]);
+});
+
+test("a replayed message that starts with @ or / stays plain text, as the inbox sent it", async () => {
+	const run = await followUpHanded("@notes.md is wrong");
+	assert.equal(runCli(["send", run.handle, "--follow-up", "/review it"], spawnEnv(agentDir(), join(root, "bin"))).status, 0);
+	new InboxDelivery(run.runDir).deliver({ isIdle: () => false, send: () => {}, abort: () => {} });
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE, " @notes.md is wrong", " /review it"]);
 });
 
 test("a child idle at quit resumes idle, with no message and no result", async () => {
