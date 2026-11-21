@@ -1,8 +1,9 @@
 import { rmSync } from "node:fs";
 import { TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { hasResults, isExitKnown, reportExitedRuns, returnResults, takeResults } from "./outbox.ts";
-import { startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
+import { awaitsDeadline, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { effectiveRunState, guarded, listRuns, type RunMetadata, type RunState } from "./shared.ts";
+import { reportStuckStarts } from "./start-check.ts";
 
 export interface SessionTickOptions {
 	sessionId: () => string;
@@ -51,12 +52,15 @@ export class SessionTick {
 		const runs = startQueuedRuns(listRuns(sessionId()), onStartError ?? (() => {}));
 		// Before the delivery guard: a time limit holds with results off and while Pi cannot take a message.
 		stopTimedOutRuns(runs);
+		reportStuckStarts(runs);
 		// A launch that failed was reported, and no child runs: its row would keep the tick for nothing.
 		const rows = runs
 			.map((run) => ({ run, state: effectiveRunState(run) }))
 			.filter(({ run, state }) => state !== "exited" && !(state === "error" && isExitKnown(run.runDir)));
 		show?.(rows);
-		if (!deliver) return rows.length > 0;
+		// A child reported `exited` that may still run in tmux keeps the tick for its time limit.
+		const deadlines = runs.some(awaitsDeadline);
+		if (!deliver) return rows.length > 0 || deadlines;
 		// Results that wait for Pi keep the tick until they are sent.
 		if (!deliver.ready()) return runs.length > 0;
 		const inGrace = reportExitedRuns(runs);
@@ -70,6 +74,6 @@ export class SessionTick {
 			}
 			for (const file of taken.files) rmSync(file, { force: true });
 		}
-		return rows.length > 0 || inGrace || hasResults(runs);
+		return rows.length > 0 || inGrace || deadlines || hasResults(runs);
 	}
 }
