@@ -15,7 +15,7 @@ Each subagent is a full Pi in its own tmux session, with its own JSONL transcrip
 | **Queue** | At most 4 children of one session run at once (`subagentLimit`). The rest queue and start by themselves, in order, when a slot is free. |
 | **Time limits** | `--timeout 10m` stops a child that is still working at its deadline and reports it as `timed out`. An idle child that has answered is not stopped. |
 | **Roles** | Agent files in `~/.pi/agent/agents/` or a project's `.pi/agents/` hold a role's model, thinking level, tools, extensions, and instructions: `spawn --agent implementer`. A project agent file cannot load code. |
-| **Light children** | `--extensions <list>` loads only the listed extensions; `--no-mcp` starts no MCP servers. The command guard `cc-safety-net` stays in each light child. |
+| **Light children** | `--extensions <list>` loads only the listed extensions; `--no-mcp` starts no MCP servers. The command guard `cc-safety-net` stays in each child, also with `--no-extensions`; only you can drop it, with `PI_SUBAGENT_ALLOW_UNGUARDED=1`. |
 | **Worktrees** | `--worktree <topic> --base <branch>` gives a child its own Git worktree and branch under `~/WORK/dev/.worktrees/<repo>/<topic>`, so parallel implementers do not conflict. |
 | **Lifecycle** | Quitting the parent suspends its children; resuming the parent session starts them again with their full history, and a child cut mid-task continues it and reports its result. A parent that dies leaves no running children: the next Pi suspends them. Transcripts stay after `stop`, and `pi --resume` can continue them. |
 | **Fast parent** | The parent checks its children with no program start, and only while it has children. A session with no children does no subagent work. On a busy machine this was the difference between a frozen Pi and a responsive one. |
@@ -142,8 +142,8 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `--prompt <text>`                      |                                                      | Repeatable. All prompts go into the first turn. Text that starts with `--`: `--prompt=<text>`. The child reads the first turn as text, never as Pi options. |
 | `--file <path>`                        |                                                      | Repeatable. Attached to the first turn.                                               |
 | `--no-context-files`                   | off                                                  | Ignore `AGENTS.md` and `CLAUDE.md`, for a review those must not bias.                 |
-| `--no-extensions`                      | off                                                  | No extensions except the subagent control bridge.                                     |
-| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard. When `packages` has no guard, `spawn` prints a warning. |
+| `--no-extensions`                      | off                                                  | No extensions except the subagent control bridge and the command guard `cc-safety-net`. |
+| `--extensions <list>`                  | all extensions                                       | Comma-separated paths or sources (`npm:…`). Loads only those, plus this extension and the command guard `cc-safety-net` from Pi's `packages` (npm, git, or local path); `-cc-safety-net` in the list drops the guard only when `PI_SUBAGENT_ALLOW_UNGUARDED=1`; else `spawn` refuses it. When `packages` has no guard, `spawn` prints a warning. |
 | `--no-mcp`                             | off                                                  | Start no MCP servers. With `--extensions`, a light child that starts fast.            |
 | `--no-skills`, `--no-prompt-templates` | off                                                  | Strip skills or prompt templates.                                                     |
 | `--timeout <duration>`                 | none                                                 | Time limit such as `90s`, `10m`, or `1h`, counted from each launch and from each new turn of an idle child. A child still working past it is stopped and reported as `timed out`; its run and transcript stay. A child that answered and is idle is not stopped. |
@@ -158,6 +158,7 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 | `PI_SUBAGENT_HERDR_PANES=0` | on inside Herdr | No Herdr pane per working child. |
 | `PI_SUBAGENT_WORKTREE_ROOT` | `~/WORK/dev/.worktrees` | Root for `--worktree`; the worktree is `<root>/<repo>/<topic>`. |
 | `PI_SUBAGENT_PI` | `pi` | The program a child runs, for tests. |
+| `PI_SUBAGENT_ALLOW_UNGUARDED=1` | unset | `spawn` accepts `-cc-safety-net` in `--extensions` and starts the child without the command guard. Set it before you start Pi: the model writes the tool's parameters, so it must not be able to drop the guard alone. |
 
 `PI_SUBAGENT_PARENT_PID`, `PI_SUBAGENT_PARENT_STARTED`, `PI_SUBAGENT_QUEUE`, `PI_SUBAGENT_RUN_DIR`, and `PI_SUBAGENT_NESTED` pass state between the parent, the CLI, and the child; the package sets them, do not set them yourself.
 
@@ -166,6 +167,8 @@ The parent keeps focus. Set `PI_SUBAGENT_HERDR_PANES=0` before you start Pi to t
 An agent file holds a role, so each `spawn` does not repeat its settings. `subagent spawn --agent implementer` reads `implementer.md` from `.pi/agents/` in the current directory, then from `~/.pi/agent/agents/`. A project file overrides a global file with the same name. An unknown name fails and starts nothing.
 
 A project agent file comes from the repository, not from you, so it cannot load code: `spawn` ignores its `extensions` field, keeps the default extensions and the command guard, and prints one warning that names the file. Only a global agent file or `--extensions` on `spawn` loads extensions.
+
+A repository can also commit a symlink, which would put any file you can read into the child's prompt. So `spawn` and `agents` read a project agent file only when it is a regular file, not a symlink, and `.pi/agents/` is inside the project; they skip any other file with one warning that names it. Global agent files may be symlinks.
 
 ```markdown
 ---
