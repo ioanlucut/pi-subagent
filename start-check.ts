@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { LockBusyError } from "./lock.ts";
 import { isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import { track } from "./queue.ts";
-import { awaitsLaunchTurn, effectiveRunState, hasFirstPrompt, type RunMetadata, updateMetadata } from "./shared.ts";
+import { awaitsLaunchTurn, effectiveRunState, forOneRun, hasFirstPrompt, type RunMetadata, updateMetadata } from "./shared.ts";
 
 /** Pi accepts the first prompt right after its session starts; one it has not accepted by then was rejected. */
 export const FIRST_PROMPT_MS = 15_000;
@@ -20,11 +20,13 @@ export const FIRST_PROMPT_MS = 15_000;
  * The screen is read and the session ended in child processes, as the tick runs on Pi's UI thread.
  */
 export function reportStuckStarts(runs: RunMetadata[], now = Date.now()): void {
-	for (const listed of runs) {
-		if (listed.suspended || isExitKnown(listed.runDir) || effectiveRunState(listed) === "exited") continue;
-		if (isRejectedFirstPrompt(listed, now)) failStart(listed, now);
-		else if (isWaitingForTrust(listed, now)) reportTrustWait(listed, now);
-	}
+	for (const listed of runs) forOneRun(listed, () => checkStart(listed, now), undefined);
+}
+
+function checkStart(listed: RunMetadata, now: number): void {
+	if (listed.suspended || isExitKnown(listed.runDir) || effectiveRunState(listed) === "exited") return;
+	if (isRejectedFirstPrompt(listed, now)) failStart(listed, now);
+	else if (isWaitingForTrust(listed, now)) reportTrustWait(listed, now);
 }
 
 function isRejectedFirstPrompt(run: RunMetadata, now: number): boolean {

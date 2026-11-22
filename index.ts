@@ -3,19 +3,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
-import { forgetSavedMessages, InboxDelivery } from "./inbox.ts";
-import { claimResultDelivery, reportSettledTurn } from "./outbox.ts";
+import { InboxDelivery } from "./inbox.ts";
+import { claimResultDelivery } from "./outbox.ts";
 import {
-	awaitsLaunchTurn,
 	claimRunDir,
-	dropFirstPrompt,
 	guarded,
 	effectiveRunState,
-	holdAliveFifo,
 	isLive,
 	listRuns,
 	ownStartTime,
-	nextDeadline,
 	pruneStaleRuns,
 	readMetadata,
 	recordTrustPrompt,
@@ -24,12 +20,13 @@ import {
 	suspendSessionRuns,
 	type RunMetadata,
 	type RunState,
-	updateMetadata,
 } from "./shared.ts";
+import { ChildRun } from "./child.ts";
 import { HerdrPanes } from "./herdr-panes.ts";
 import { resumeSuspendedRuns, settleTmuxCalls } from "./queue.ts";
 import { SessionTick } from "./tick.ts";
 import { runSubagentTool } from "./tool.ts";
+import { recordUnguardedChoice } from "./unguarded.ts";
 import { SubagentToolSchema } from "./tool-schema.ts";
 import { ActivityTracker, widgetLines } from "./widget.ts";
 
@@ -184,6 +181,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		// `subagent spawn` runs from the bash tool, which inherits these, and saves them to find orphans later.
 		process.env.PI_SUBAGENT_PARENT_PID = String(process.pid);
 		process.env.PI_SUBAGENT_PARENT_STARTED = ownStartTime() ?? "";
+		// Read once, from the environment Pi started with: the model can write the variable on its own command.
+		recordUnguardedChoice();
 
 		pi.on("session_start", async (_event, ctx) => {
 			// Suspend children of parents that died without shutdown, so they relaunch when their session resumes.
@@ -253,10 +252,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	};
 
 	const inbox = new InboxDelivery(runDir);
+	const child = new ChildRun(runDir);
 
 	const processInbox = guarded("inbox", (): void => {
 		const ctx = currentContext;
-		if (!ctx) return;
+		if (!ctx || !child.isOwn()) return;
+		child.poll(ctx.isIdle());
 		syncSessionName();
 		inbox.deliver({
 			isIdle: () => ctx.isIdle(),
@@ -274,22 +275,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		currentContext = ctx;
-		const metadata = readMetadata(runDir);
-		if (!metadata) return;
-		// The parent checks this FIFO each tick to find out, with no program started, whether this child runs.
-		holdAliveFifo(runDir);
-		updateMetadata(runDir, {
-			childSessionId: ctx.sessionManager.getSessionId(),
-			childPid: process.pid,
-			sessionStartedAt: new Date().toISOString(),
-			promptAccepted: undefined,
-			waitsForTrust: undefined,
-			trustReported: undefined,
-			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
-			state: ctx.isIdle() ? "idle" : "busy",
-			suspended: undefined,
-			error: undefined,
-		});
+		child.sessionStarted({ id: ctx.sessionManager.getSessionId(), file: ctx.sessionManager.getSessionFile(), idle: ctx.isIdle() });
 		syncSessionName();
 		if (!timer) {
 			timer = setInterval(processInbox, 250);
@@ -299,30 +285,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	});
 
 	// Pi checks the model and its login before this; MCP servers can then hold the turn's start for 10 s.
-	pi.on("before_agent_start", () => {
-		updateMetadata(runDir, (metadata) => (!awaitsLaunchTurn(metadata) || metadata.promptAccepted ? undefined : { promptAccepted: true }));
-	});
+	pi.on("before_agent_start", () => child.promptRunning());
 
 	pi.on("agent_start", (_event, ctx) => {
 		currentContext = ctx;
 		inbox.promptStarted();
-		// A turn from idle that the inbox did not start (typed in the pane): its time limit counts from now.
-		updateMetadata(runDir, (metadata) => {
-			const deadline = metadata.state === "idle" ? nextDeadline(metadata) : undefined;
-			// The work a suspend cut is begun again, so a later suspend judges the turn by itself.
-			return { state: "busy", hasStarted: true, error: undefined, cutWork: undefined, ...(deadline && { deadline }) };
-		});
+		child.turnStarted();
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
 		currentContext = ctx;
-		if (!ctx.isIdle()) return;
-		// The result first: a `stop` that sees `idle` then finds it, and prints it.
-		reportSettledTurn(runDir);
-		dropFirstPrompt(runDir);
-		const sessionFile = readMetadata(runDir)?.sessionFile;
-		if (sessionFile) forgetSavedMessages(runDir, sessionFile);
-		updateMetadata(runDir, { state: "idle" });
+		if (ctx.isIdle()) child.turnSettled();
 	});
 
 	pi.on("session_shutdown", (event) => {
@@ -331,6 +304,6 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = undefined;
 		}
-		if (event.reason === "quit") updateMetadata(runDir, { state: "exited" });
+		child.sessionEnded(event.reason);
 	});
 }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
+import { ChildRun } from "./child.ts";
 import { InboxDelivery } from "./inbox.ts";
 import { markExitKnown, markWaiting, writeResult } from "./outbox.ts";
 import { claimSuspendedRun } from "./queue.ts";
@@ -542,6 +543,27 @@ test("a child idle before its first turn 15 s after its session started is stopp
 	assert.deepEqual(shown.at(-1), [{ handle: "bbb222", state: "starting" }]);
 });
 
+test("a child whose first turn starts after 20 s, held by another extension before this one sees it, is not reported failed to start", async () => {
+	mock.timers.reset();
+	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
+	screenTmux(NO_LOGIN_SCREEN);
+	const { tick, sent } = parentTick();
+	const { run } = liveRun("aaa111", { state: "idle", hasStarted: false, sessionStartedAt: new Date().toISOString() });
+	saveFirstPrompt(run.runDir, ["Task:\nSay hi."]);
+	// Pi took the first prompt and is busy; another extension's `before_agent_start` holds it, so this one's has not run.
+	new ChildRun(run.runDir).poll(false);
+
+	tick.wake();
+	for (let i = 0; i < 20; i++) {
+		mock.timers.tick(1000);
+		await settleTmuxCalls();
+	}
+
+	assert.deepEqual(sent, []);
+	assert.deepEqual(tmuxCalls(), []);
+	assert.equal(readMetadata(run.runDir)?.state, "idle");
+});
+
 test("a resumed child whose continue message never starts a turn is stopped and reported failed to start once, with Pi's error", async () => {
 	mock.timers.reset();
 	mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.now() });
@@ -630,6 +652,46 @@ test("a queued child keeps the tick, and starts when the last live child ends", 
 	mock.timers.tick(1000);
 	await settleTmuxCalls();
 	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+});
+
+test("a queued child with a time limit too long for a date does not stop the tick: the other children start and report", async () => {
+	process.env.PI_SUBAGENT_LIMIT = "2";
+	const { tick, sent } = parentTick();
+	const { child } = liveRun("aaa111");
+	// Written by a `spawn` of a version that did not limit the duration.
+	queuedRun("bad000", { timeout: "99999999999999h", createdAt: new Date(Date.now() - 2000).toISOString() });
+	queuedRun("bbb222", { createdAt: new Date(Date.now() - 1000).toISOString() });
+
+	tick.wake();
+	await settleTmuxCalls();
+	await kill(child);
+	mock.timers.tick(1000);
+	await settleTmuxCalls();
+
+	assert.deepEqual(started().sort(), ["pi-subagent-bad000", "pi-subagent-bbb222"]);
+	assert.match(sent.join(), /^Subagent aaa111 exited\n/);
+});
+
+test("a run whose directory cannot be written does not stop the tick: the next queued child starts, and another child's exit arrives", async () => {
+	process.env.PI_SUBAGENT_LIMIT = "3";
+	const { tick, sent } = parentTick();
+	const { child } = liveRun("aaa111");
+	const stuck = liveRun("ro2222", { deadline: new Date(Date.now() - 1000).toISOString() }).run;
+	const stuckQueued = queuedRun("ro1111", { createdAt: new Date(Date.now() - 2000).toISOString() });
+	queuedRun("bbb222", { createdAt: new Date(Date.now() - 1000).toISOString() });
+	for (const run of [stuck, stuckQueued]) chmodSync(run.runDir, 0o500);
+	try {
+		tick.wake();
+		await settleTmuxCalls();
+		await kill(child);
+		mock.timers.tick(1000);
+		await settleTmuxCalls();
+	} finally {
+		for (const run of [stuck, stuckQueued]) chmodSync(run.runDir, 0o700);
+	}
+
+	assert.deepEqual(started(), ["pi-subagent-bbb222"]);
+	assert.match(sent.join(), /^Subagent aaa111 exited\n/);
 });
 
 test("a queued child alone starts on wake", async () => {

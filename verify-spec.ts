@@ -192,7 +192,7 @@ const suites: [string, string[], string[]][] = [
 	["#65", ["subagent.test.ts"], [
 		"a package with extensions [a.ts] in settings.json gives a light child only a.ts of that package, never the package root",
 		"provider discovery never runs an extension that the package filter in settings.json disables, nor its package",
-		"with no command guard in Pi's packages, spawn --no-extensions fails, and starts unguarded only with PI_SUBAGENT_ALLOW_UNGUARDED=1",
+		"with no command guard in Pi's packages, spawn --no-extensions fails, and starts unguarded only when the user allowed it in Pi's settings",
 	]],
 ];
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
