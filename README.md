@@ -91,7 +91,7 @@ When ticket 17 is merged, `subagent stop a1b2c3` frees its slot and the queued c
 | **Fast parent** | The parent checks its children with no program start, and only while it has children. Herdr panes and quit run in the background. | How it works |
 | **Safe in parallel** | Parallel `spawn`, two `resume` of one child, and two Pi on one session keep the limit and never start a child twice: every change to a run happens under a lock. | How it works |
 | **Right environment** | A child gets the environment of the shell that started it, not of the tmux server, so it uses the same logins (`PI_CODING_AGENT_DIR`) and `PATH`. | Fixed upstream bugs below |
-| **Verified** | `npm test` (202 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login); CI runs `npm test` and `verify:e2e`. | Development |
+| **Verified** | `npm test` (222 tests), `npm run verify:spec`, and `npm run verify:e2e` (real Pi processes, a fake model, no login); CI runs `npm test` and `verify:e2e`. | Development |
 
 ## Where this fork comes from
 
