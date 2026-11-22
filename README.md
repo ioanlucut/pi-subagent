@@ -187,14 +187,12 @@ One model finds some bugs and misses others. The [Audit with three models](#audi
 ## 🔍 How it works
 
 ```mermaid
-flowchart LR
-    U([you]) --> P[parent Pi]
-    P -- "subagent tool / CLI" --> S[spawn]
-    S --> Q{slot free?}
-    Q -- yes --> T["tmux session<br/>child Pi"]
-    Q -- no --> W[queued]
-    W -. "a slot frees" .-> T
-    T -- "answer → outbox" --> R[result message]
+flowchart TD
+    P["parent Pi"] -- "subagent tool or CLI" --> S{"slot free?"}
+    S -- yes --> C["child Pi<br/>own tmux session"]
+    S -- no --> Q["queued"]
+    Q -. "a slot frees" .-> C
+    C -- "answer" --> R["result message<br/>in your chat"]
     R --> P
 ```
 
@@ -217,7 +215,7 @@ Full table: [Lifecycle](#lifecycle).
 
 ## 📊 Built and checked
 
-| | |
+| What | How |
 | --- | --- |
 | **Tests** | 222 unit and integration tests, `npm run verify:spec` (one check per spec ticket), and `npm run verify:e2e` (real Pi processes with a fake model, no login); CI runs `npm test` and `verify:e2e` on each pull request |
 | **Reviews** | Seven independent review rounds on four models (Opus, Fable, Astra, Sol), plus a real-model run; every finding was reproduced with a probe before it was fixed |
