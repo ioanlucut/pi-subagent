@@ -67,13 +67,17 @@ export class SessionTick {
 		const ready = deliver.ready();
 		// Another Pi on the session shows its runs, but only the run's owner sends their results.
 		const owned = runs.filter((run) => actsAsParent(run, { exact: false }));
+		// Before the resend: a result sent before a quit and found in the session is not sent again, however old.
+		forgetDeliveredResults(owned, deliver.delivered);
 		let inGrace = false;
 		if (ready) {
 			inGrace = reportExitedRuns(owned);
 			const results = takeResultsToSend(owned);
-			if (results) deliver.send(results.text, results.results);
+			if (results) {
+				deliver.send(results.text, results.results);
+				forgetDeliveredResults(owned, deliver.delivered);
+			}
 		}
-		forgetDeliveredResults(owned, deliver.delivered);
 		// Results that wait for Pi keep the tick until they are in the session.
 		if (!ready) return runs.length > 0;
 		return rows.length > 0 || inGrace || deadlines || hasResults(owned);

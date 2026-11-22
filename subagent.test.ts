@@ -16,8 +16,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { pendingResults, reportExitedRuns, reportSettledTurn } from "./outbox.ts";
+import { forgetSavedMessages, InboxDelivery } from "./inbox.ts";
 import { resumeSuspendedRuns, settleTmuxCalls, startQueuedRuns, stopTimedOutRuns } from "./queue.ts";
 import { runSubagentTool, TOOL_ACTIONS } from "./tool.ts";
+import { recordUnguardedChoice } from "./unguarded.ts";
 import {
 	claimRunDir,
 	effectiveRunState,
@@ -69,13 +71,16 @@ afterEach(() => {
 
 /**
  * `pi --help`, as `spawn` asks it whether a light child knows its provider: `test` and `anthropic` are
- * built in; an extension directory provides the provider named in its file `provides`. Pi reports an unknown
- * provider on stderr, and exits 0.
+ * built in; an extension directory provides the provider named in its file `provides`, an extension file the one
+ * named in its line `// provides <name>`. Pi reports an unknown provider on stderr, and exits 0. Each extension
+ * it loads is appended to `help.log` beside it, so a test can tell which extensions were run.
  */
 const fakeHelp = `if (process.argv.includes("--help")) {
 	const argv = process.argv;
+	const fs = require("node:fs");
 	const provider = argv[argv.indexOf("--provider") + 1];
-	const provides = (dir) => { try { return [require("node:fs").readFileSync(dir + "/provides", "utf8").trim()]; } catch { return []; } };
+	const provides = (path) => { try { return fs.statSync(path).isDirectory() ? [fs.readFileSync(path + "/provides", "utf8").trim()] : [/\\/\\/ provides (\\S+)/.exec(fs.readFileSync(path, "utf8"))[1]]; } catch { return []; } };
+	for (const [i, arg] of argv.entries()) if (argv[i - 1] === "--extension") fs.appendFileSync(require("node:path").join(__dirname, "help.log"), arg + "\\n");
 	const known = ["test", "anthropic", ...argv.flatMap((arg, i) => (argv[i - 1] === "--extension" ? provides(arg) : []))];
 	if (!known.includes(provider)) process.stderr.write('Error: Unknown provider "' + provider + '". Use --list-models to see available providers/models.\\n');
 	process.exit(0);
@@ -227,6 +232,20 @@ test("spawn gives the child its own working directory in PWD, not the caller's",
 
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal((await childEnv(agentDir())).get("PWD"), childCwd);
+});
+
+test("spawn --cwd with C#, #{session_name}, or #[fg=red] in its name starts the child in that directory", async () => {
+	const bin = fakePi(join(root, "bin"));
+	for (const name of ["C#", "y#{session_name}", "s#[fg=red]t", "a##[b", "z##"]) {
+		const childCwd = join(root, name);
+		mkdirSync(childCwd);
+		const result = runCli(["spawn", "--cwd", childCwd, "--prompt", "hi"], spawnEnv(agentDir(), bin));
+		assert.equal(result.status, 0, result.stderr);
+		const run = listRuns().find((each) => each.cwd === childCwd)!;
+		await startedChild(run);
+		const pane = spawnSync("tmux", ["display-message", "-p", "-t", run.tmuxSession, "#{pane_start_path}"], { encoding: "utf8" });
+		assert.equal(pane.stdout.trim(), childCwd);
+	}
 });
 
 test("a failed relaunch leaves no launch file with the caller's environment behind", async () => {
@@ -420,6 +439,144 @@ test("a quit before the child saved its first prompt resumes it with that prompt
 	assert.equal(endTurn(run, "Reviewed.").length, 1);
 });
 
+/**
+ * The handlers of a child Pi of `launchId`, run in their own process as Pi fires them: `events` in order. The
+ * child of the launch a quit killed runs on for seconds, and still fires them.
+ */
+function childEvents(run: RunMetadata, launchId: string | undefined, events: string[]): void {
+	const script = `import { claimRunDir } from ${JSON.stringify(join(import.meta.dirname, "shared.ts"))};
+import { ChildRun } from ${JSON.stringify(join(import.meta.dirname, "child.ts"))};
+const child = new ChildRun(claimRunDir());
+for (const event of ${JSON.stringify(events)}) {
+	if (event === "session_start") child.sessionStarted({ id: "child-session", file: undefined, idle: true });
+	if (event === "busy") child.poll(false);
+	if (event === "before_agent_start") child.promptRunning();
+	if (event === "agent_start") child.turnStarted();
+	if (event === "agent_settled") child.turnSettled();
+	if (event === "session_shutdown") child.sessionEnded("quit");
+}
+process.exit(0);`;
+	const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+		encoding: "utf8",
+		env: { ...process.env, PI_SUBAGENT_RUN_DIR: run.runDir, PI_SUBAGENT_LAUNCH_ID: launchId ?? "" },
+	});
+	assert.equal(result.status, 0, result.stderr);
+}
+
+/** The aborted turn of a child the quit killed, as Pi writes it. */
+const abortedTurn = (run: RunMetadata) =>
+	writeFileSync(run.sessionFile, `${JSON.stringify({ type: "message", id: "a0", parentId: null, message: { role: "assistant", content: [], stopReason: "aborted", errorMessage: "Operation aborted" } })}\n`, { flag: "a" });
+
+test("a quit while the child starts keeps its task, though the killed child's handlers run after the suspension; the parent gets one result", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	const launch = readMetadata(run.runDir)!.launchId;
+	assert.ok(launch, "spawn records its launch");
+	await startedChild(run);
+
+	await suspendSessionRuns("parent");
+	// The killed child's Pi runs on: its session starts, its first prompt starts a turn, the kill aborts it, it ends.
+	childEvents(run, launch, ["session_start", "busy", "before_agent_start", "agent_start"]);
+	abortedTurn(run);
+	childEvents(run, launch, ["agent_settled", "session_shutdown"]);
+
+	const after = readMetadata(run.runDir)!;
+	assert.equal(after.suspended, true);
+	assert.equal(after.cutWork, "first-prompt");
+	assert.equal(existsSync(join(run.runDir, "first-prompt.json")), true);
+	assert.equal(pendingResults(listRuns()), undefined, "no result for the aborted turn");
+
+	for (const file of ["argv", "probe"]) rmSync(join(run.runDir, file));
+	await withEnv({ PATH: `${join(root, "bin")}:${basePath}` }, async () => {
+		resumeSuspendedRuns("parent", (_run, error) => assert.fail(error));
+		await settleTmuxCalls();
+	});
+	await startedChild(run);
+	const args = JSON.parse(readFileSync(join(run.runDir, "argv"), "utf8")) as string[];
+	assert.deepEqual(args.slice(args.indexOf("--") + 1), ["Task:\nhi"]);
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nhi"));
+	assert.equal(endTurn(run, "Done.").length, 1);
+});
+
+test("a resume while the killed child still runs: its late handlers do not touch the new launch, and the parent gets one finished result", async () => {
+	spawnChildren(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	const launch = readMetadata(run.runDir)!.launchId;
+	await startedChild(run);
+	// The child's session started, and its first prompt waits on another extension's `before_agent_start`.
+	childEvents(run, launch, ["session_start"]);
+	await suspendSessionRuns("parent");
+
+	for (const file of ["argv", "probe"]) rmSync(join(run.runDir, file));
+	await withEnv({ PATH: `${join(root, "bin")}:${basePath}` }, async () => {
+		resumeSuspendedRuns("parent", (_run, error) => assert.fail(error));
+		await settleTmuxCalls();
+	});
+	await startedChild(run);
+	const resumed = readMetadata(run.runDir)!;
+	assert.notEqual(resumed.launchId, launch);
+	// The old child's turn starts, is aborted, and its Pi ends, after the new child started.
+	childEvents(run, launch, ["before_agent_start", "agent_start"]);
+	abortedTurn(run);
+	childEvents(run, launch, ["agent_settled", "session_shutdown"]);
+
+	const after = readMetadata(run.runDir)!;
+	assert.equal(after.state, resumed.state);
+	assert.equal(after.cutWork, "first-prompt");
+	assert.equal(after.childPid, resumed.childPid);
+	assert.equal(existsSync(join(run.runDir, "first-prompt.json")), true);
+	assert.equal(pendingResults(listRuns()), undefined, "no failed (aborted) result");
+	// The new child runs the task.
+	childEvents(run, resumed.launchId, ["agent_start"]);
+	writeFileSync(run.sessionFile, transcriptMessage("u1", "a0", "user", "Task:\nhi"), { flag: "a" });
+	const results = endTurn(run, "Done.");
+	assert.equal(results.length, 1);
+	assert.match(results[0], /^Subagent \w+ finished\n/);
+});
+
+/** A busy child with a task in its transcript gets `message` by `send --follow-up` and hands it to Pi, which holds it in memory. */
+async function followUpHanded(message: string): Promise<RunMetadata> {
+	spawnChildren(1, { PI_SESSION_ID: "parent" });
+	const [run] = listRuns();
+	await startedChild(run);
+	writeFileSync(run.sessionFile, transcriptMessage("u1", null, "user", "Task:\nhi"));
+	updateMetadata(run.runDir, { hasStarted: true, state: "busy" });
+	assert.equal(runCli(["send", run.handle, "--follow-up", message], spawnEnv(agentDir(), join(root, "bin"))).status, 0);
+	new InboxDelivery(run.runDir).deliver({ isIdle: () => false, send: () => {}, abort: () => {} });
+	return run;
+}
+
+const CONTINUE = "Your previous turn was stopped because the parent Pi quit. Continue the task where you stopped, then give your answer.";
+
+test("a follow-up queued while busy, then quit and resume, is delivered once, after the continue message", async () => {
+	const run = await followUpHanded("Also check the docs");
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE, "Also check the docs"]);
+
+	// The resumed child saves it and settles; a later quit and resume does not send it again.
+	writeFileSync(run.sessionFile, transcriptMessage("u2", "u1", "user", "Also check the docs"), { flag: "a" });
+	forgetSavedMessages(run.runDir, run.sessionFile);
+	updateMetadata(run.runDir, { cutWork: undefined });
+	assert.deepEqual(await quitAndResume(run, "idle"), []);
+	assert.deepEqual(readdirSync(join(run.runDir, "inbox")), []);
+});
+
+test("a follow-up that reached the transcript is not sent again after resume", async () => {
+	const run = await followUpHanded("Also check the docs");
+	// Pi started the follow-up's turn and saved it; the quit came before the turn settled.
+	writeFileSync(run.sessionFile, transcriptMessage("u2", "u1", "user", "Also check the docs"), { flag: "a" });
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE]);
+});
+
+test("a replayed message that starts with @ or / stays plain text, as the inbox sent it", async () => {
+	const run = await followUpHanded("@notes.md is wrong");
+	assert.equal(runCli(["send", run.handle, "--follow-up", "/review it"], spawnEnv(agentDir(), join(root, "bin"))).status, 0);
+	new InboxDelivery(run.runDir).deliver({ isIdle: () => false, send: () => {}, abort: () => {} });
+
+	assert.deepEqual(await quitAndResume(run, "busy"), [CONTINUE, " @notes.md is wrong", " /review it"]);
+});
+
 test("a child idle at quit resumes idle, with no message and no result", async () => {
 	spawnChildren(1, { PI_SESSION_ID: "parent" });
 	const [run] = listRuns();
@@ -449,6 +606,20 @@ async function withEnv(env: NodeJS.ProcessEnv, body: () => Promise<void> | void)
 	Object.assign(process.env, env);
 	try {
 		await body();
+	} finally {
+		for (const [name, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+}
+
+/** `withEnv` for a synchronous `body`. */
+function withEnvSync(env: NodeJS.ProcessEnv, body: () => void): void {
+	const saved = Object.fromEntries(Object.keys(env).map((name) => [name, process.env[name]]));
+	Object.assign(process.env, env);
+	try {
+		body();
 	} finally {
 		for (const [name, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[name];
@@ -512,6 +683,18 @@ test("wait reports a completed turn as finished", () => {
 	const result = runCli(["wait", handle], {});
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal(result.stdout, "abc123 finished\n\nAll good.\n");
+});
+
+test("wait on a resumed child that never starts its continue message reports failed to start, not its old answer", () => {
+	const handle = idleRun({ content: [{ type: "text", text: "Old answer." }], stopReason: "stop" });
+	// Resumed after a quit cut its turn; its session started 10 s ago, and the continue message has not started a turn.
+	const runDir = join(agentDir(), "subagents", handle);
+	updateMetadata(runDir, { cutWork: "continue", sessionStartedAt: new Date(Date.now() - 10_000).toISOString() });
+
+	const result = runCli(["wait", handle], {});
+
+	assert.equal(result.status, 1);
+	assert.match(result.stdout, /^abc123 failed to start\n\nIts Pi did not start the continue message within 15 s, so it was stopped\./);
 });
 
 /** A run directory with no live child, last updated `ageDays` ago. */
@@ -755,17 +938,27 @@ test("interrupt queues an interrupt for a busy child, and tells that an idle chi
 	assert.deepEqual(JSON.parse(readFileSync(join(run.runDir, "inbox", file), "utf8")), { message: "", delivery: "interrupt" });
 });
 
+/** A fake command guard package in `dir`, shaped like the real one: its manifest names its extension file, returned. */
+function guardPackage(dir: string): string {
+	mkdirSync(join(dir, "dist"), { recursive: true });
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "cc-safety-net", pi: { extensions: ["./dist/index.js"] } }));
+	writeFileSync(join(dir, "dist", "index.js"), "");
+	return join(dir, "dist", "index.js");
+}
+
+/** The extension file of the guard `installGuard` installs. */
+const guardFile = () => join(agentDir(), "npm", "node_modules", "cc-safety-net", "dist", "index.js");
+
 /** Install a fake command guard where `pi install npm:cc-safety-net` puts it, and list it in Pi's packages. */
 function installGuard(): string {
-	const guard = join(agentDir(), "npm", "node_modules", "cc-safety-net");
-	mkdirSync(guard, { recursive: true });
+	mkdirSync(agentDir(), { recursive: true });
+	const guard = guardPackage(join(agentDir(), "npm", "node_modules", "cc-safety-net"));
 	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net@2.7.15"] }));
 	return guard;
 }
 
 test("spawn --extensions passes a command guard that Pi's packages list as a local path", async () => {
-	const guard = join(root, "checkouts", "cc-safety-net");
-	mkdirSync(guard, { recursive: true });
+	const guard = guardPackage(join(root, "checkouts", "cc-safety-net"));
 	mkdirSync(agentDir());
 	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:other", { source: "../checkouts/cc-safety-net" }] }));
 
@@ -776,12 +969,107 @@ test("spawn --extensions passes a command guard that Pi's packages list as a loc
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts"]);
 });
 
-test("spawn --extensions warns when Pi's packages have no command guard, and starts the child", async () => {
-	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
+/** Turn on `subagentAllowUnguarded` in Pi's settings, as the user does, keeping the other settings. */
+function allowUnguardedInSettings(): void {
+	const file = join(agentDir(), "settings.json");
+	mkdirSync(agentDir(), { recursive: true });
+	const settings = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
+	writeFileSync(file, JSON.stringify({ ...settings, subagentAllowUnguarded: true }));
+}
+
+/** What a parent Pi gives the commands of its bash tool: its own process, which records the user's choice at load. */
+const parentPiEnv = () => ({ PI_SESSION_ID: "parent-session", PI_SUBAGENT_PARENT_PID: String(process.pid), PI_SUBAGENT_PARENT_STARTED: "Mon Nov 23 10:00:00 2026" });
+
+test("with no command guard in Pi's packages, spawn --no-extensions fails, and starts unguarded only when the user allowed it in Pi's settings", async () => {
+	const env = spawnEnv(agentDir(), fakePi(join(root, "bin")));
+	const refused = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], { ...env, PI_SUBAGENT_ALLOW_UNGUARDED: "1" });
+
+	assert.equal(refused.status, 1);
+	assert.equal(
+		refused.stderr.split("\n").at(-2) + "\n",
+		"The command guard cc-safety-net is not installed or is turned off in Pi's packages, so a light child would run without it. Install it with `pi install npm:cc-safety-net`, or drop --no-extensions or --extensions. Only the user can allow children without the guard, in Pi's settings.\n",
+	);
+	assert.deepEqual(listRuns(), []);
+
+	allowUnguardedInSettings();
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], env);
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed in Pi's packages; the child runs without it\n");
-	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+	assert.equal(result.stderr, "Warning: the command guard cc-safety-net is not installed or is turned off in Pi's packages; the child runs without it, as the user allowed in Pi's settings\n");
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts")]);
+});
+
+test("the model's PI_SUBAGENT_ALLOW_UNGUARDED=1 on its own spawn command does not drop the guard, and the refusal names no variable", () => {
+	installGuard();
+	const env = { ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), ...parentPiEnv() };
+	// The parent Pi started without the user's choice.
+	withEnvSync(env, () => recordUnguardedChoice());
+
+	const result = runCli(["spawn", "--cwd", root, "--extensions", "x,-cc-safety-net", "--prompt", "hi"], { ...env, PI_SUBAGENT_ALLOW_UNGUARDED: "1" });
+
+	assert.equal(result.status, 1);
+	assert.equal(result.stderr, "-cc-safety-net drops the command guard; only the user can allow children without the guard, in Pi's settings\n");
+	assert.doesNotMatch(result.stderr, /PI_SUBAGENT|=1/);
+	assert.deepEqual(listRuns(), []);
+});
+
+test("PI_SUBAGENT_ALLOW_UNGUARDED=1 set by the user before the parent Pi started lets the tool and the CLI drop the guard", async () => {
+	installGuard();
+	const env = { ...spawnEnv(agentDir(), fakePi(join(root, "bin"))), ...parentPiEnv() };
+	withEnvSync({ ...env, PI_SUBAGENT_ALLOW_UNGUARDED: "1" }, () => recordUnguardedChoice());
+
+	await withEnv(env, async () => {
+		const result = await runSubagentTool({ action: "spawn", name: "tool", extensions: "/ext/a.ts,-cc-safety-net", prompt: "hi" }, toolContext());
+		assert.equal(result.isError, false, result.text);
+	});
+	const cliResult = runCli(["spawn", "--name", "cli", "--cwd", root, "--extensions", "/ext/a.ts,-cc-safety-net", "--prompt", "hi"], env);
+	assert.equal(cliResult.status, 0, cliResult.stderr);
+
+	for (const name of ["tool", "cli"]) assert.deepEqual(extensionFlags(listRuns().find((run) => run.name === name)!.launchArgs!), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+	// Another Pi that took the process ID later, with another start time, is not allowed.
+	const reused = runCli(["spawn", "--cwd", root, "--extensions", "-cc-safety-net", "--prompt", "hi"], { ...env, PI_SUBAGENT_PARENT_STARTED: "Tue Nov 24 10:00:00 2026" });
+	assert.equal(reused.status, 1);
+});
+
+/**
+ * A local package with the extensions `a.ts` and `b.ts` in its `extensions` directory, each providing the provider
+ * in `provides`, listed in Pi's `packages` with `filter` as its `extensions`, after the command guard.
+ */
+function installFilteredPackage(provides: { a?: string; b?: string }, filter: string[]): { a: string; b: string; guard: string } {
+	const guard = installGuard();
+	const pkg = join(root, "checkouts", "tools");
+	mkdirSync(join(pkg, "extensions"), { recursive: true });
+	const a = join(pkg, "extensions", "a.ts");
+	const b = join(pkg, "extensions", "b.ts");
+	writeFileSync(a, provides.a ? `// provides ${provides.a}\n` : "");
+	writeFileSync(b, provides.b ? `// provides ${provides.b}\n` : "");
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net", { source: pkg, extensions: filter }] }));
+	return { a, b, guard };
+}
+
+test("a package with extensions [a.ts] in settings.json gives a light child only a.ts of that package, never the package root", async () => {
+	const { a, guard } = installFilteredPackage({ a: "extprov", b: "extprov" }, ["a.ts"]);
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], {
+		...spawnEnv(agentDir(), fakePi(join(root, "bin"))),
+		PI_PROVIDER: "extprov",
+	});
+
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guard, a]);
+});
+
+test("provider discovery never runs an extension that the package filter in settings.json disables, nor its package", () => {
+	const { b } = installFilteredPackage({ b: "extprov" }, ["!b.ts"]);
+	const bin = fakePi(join(root, "bin"));
+
+	const result = runCli(["spawn", "--cwd", root, "--no-extensions", "--prompt", "hi"], { ...spawnEnv(agentDir(), bin), PI_PROVIDER: "extprov" });
+
+	assert.equal(result.status, 1);
+	assert.match(result.stderr, /Provider extprov is not built in and no installed extension provides it/);
+	const loaded = readFileSync(join(bin, "help.log"), "utf8").trim().split("\n");
+	assert.deepEqual(loaded.filter((path) => b === path || b.startsWith(`${path}/`)), []);
+	assert.deepEqual(listRuns(), []);
 });
 
 test("spawn --extensions loads only the listed extensions, this extension, and the command guard", async () => {
@@ -797,34 +1085,32 @@ test("spawn --extensions loads only the listed extensions, this extension, and t
 	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guard, "/ext/a.ts", "npm:b"]);
 });
 
-test("the subagent tool refuses -cc-safety-net unless the user set PI_SUBAGENT_ALLOW_UNGUARDED=1, which drops the guard", async () => {
+test("the subagent tool refuses -cc-safety-net unless the user allowed it in Pi's settings, which drops the guard", async () => {
 	installGuard();
 	const bin = fakePi(join(root, "bin"));
 	const params = { action: "spawn", extensions: "/ext/a.ts,-cc-safety-net", prompt: "hi" } as const;
-	await withEnv(spawnEnv(agentDir(), bin), async () => {
+	await withEnv({ ...spawnEnv(agentDir(), bin), PI_SUBAGENT_ALLOW_UNGUARDED: "1" }, async () => {
 		const refused = await runSubagentTool(params, toolContext());
 		assert.equal(refused.isError, true);
-		assert.equal(
-			refused.text,
-			"-cc-safety-net drops the command guard; only the user can allow it, with PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn",
-		);
+		assert.equal(refused.text, "-cc-safety-net drops the command guard; only the user can allow children without the guard, in Pi's settings");
 		assert.equal(existsSync(getRunsDir()), false);
 	});
 
-	await withEnv({ ...spawnEnv(agentDir(), bin), PI_SUBAGENT_ALLOW_UNGUARDED: "1" }, async () => {
+	allowUnguardedInSettings();
+	await withEnv(spawnEnv(agentDir(), bin), async () => {
 		const result = await runSubagentTool(params, toolContext());
 		assert.equal(result.isError, false, result.text);
 	});
 	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
 });
 
-/** A package, listed in Pi's `packages` as a local path, that registers `provider`. */
+/** A package, listed in Pi's `packages` as a local path after the command guard, that registers `provider`. */
 function installProviderPackage(provider: string): string {
+	installGuard();
 	const pkg = join(root, "checkouts", `${provider}-pkg`);
 	mkdirSync(pkg, { recursive: true });
 	writeFileSync(join(pkg, "provides"), provider);
-	mkdirSync(agentDir(), { recursive: true });
-	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["../checkouts/other-pkg", pkg] }));
+	writeFileSync(join(agentDir(), "settings.json"), JSON.stringify({ packages: ["npm:cc-safety-net", "../checkouts/other-pkg", pkg] }));
 	mkdirSync(join(root, "checkouts", "other-pkg"), { recursive: true });
 	return pkg;
 }
@@ -840,7 +1126,7 @@ test("spawn --no-extensions with an extension provider passes that provider's pa
 	assert.equal(result.status, 0, result.stderr);
 	const args = await childArgs(agentDir());
 	assert.ok(args.includes("--no-extensions"));
-	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), pkg]);
+	assert.deepEqual(extensionFlags(args), [join(import.meta.dirname, "index.ts"), guardFile(), pkg]);
 });
 
 test("spawn --extensions with a built-in provider adds no provider package", async () => {
@@ -849,7 +1135,7 @@ test("spawn --extensions with a built-in provider adds no provider package", asy
 	const result = runCli(["spawn", "--cwd", root, "--extensions", "/ext/a.ts", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
 
 	assert.equal(result.status, 0, result.stderr);
-	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), "/ext/a.ts"]);
+	assert.deepEqual(extensionFlags(await childArgs(agentDir())), [join(import.meta.dirname, "index.ts"), guardFile(), "/ext/a.ts"]);
 });
 
 test("spawn --no-extensions fails at once, naming the provider, when no installed package provides it", () => {
@@ -1653,8 +1939,20 @@ test("spawn rejects a time limit that is not a duration", () => {
 	const result = runCli(["spawn", "--cwd", root, "--timeout", "soon", "--prompt", "hi"], spawnEnv(agentDir(), fakePi(join(root, "bin"))));
 
 	assert.equal(result.status, 1);
-	assert.match(result.stderr, /--timeout must be a duration such as 90s, 10m, or 1h/);
+	assert.match(result.stderr, /--timeout must be a duration such as 90s, 10m, or 1h, of at most 7 days/);
 	assert.deepEqual(listRuns(), []);
+});
+
+test("spawn rejects a time limit longer than 7 days, from --timeout or from an agent file", () => {
+	const env = spawnEnv(agentDir(), fakePi(join(root, "bin")));
+	agentFile(join(agentDir(), "agents"), "forever", ["timeout: 99999999999999h"]);
+
+	for (const args of [["--timeout", "99999999999999h"], ["--timeout", "169h"], ["--agent", "forever"]]) {
+		const result = runCli(["spawn", "--cwd", root, ...args, "--prompt", "hi"], env);
+		assert.equal(result.status, 1, args.join(" "));
+		assert.match(result.stderr, /--timeout must be a duration such as 90s, 10m, or 1h, of at most 7 days/);
+	}
+	assert.equal(runCli(["spawn", "--cwd", root, "--timeout", "168h", "--prompt", "hi"], env).status, 0);
 });
 
 /** Write the agent file `<dir>/<name>.md` with `frontmatter` lines and `body`. */

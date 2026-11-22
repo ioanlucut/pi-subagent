@@ -31,7 +31,11 @@ function child(idle: boolean) {
 	};
 }
 
-const pending = () => readdirSync(inboxDir(runDir)).sort();
+/** The messages the child has not taken yet. */
+const pending = () =>
+	readdirSync(inboxDir(runDir))
+		.filter((file) => file.endsWith(".json"))
+		.sort();
 
 test("an idle child gets one message as a prompt; the next waits until that run starts", () => {
 	queue("1", "first");

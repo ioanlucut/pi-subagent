@@ -1,10 +1,14 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { unsavedMessages } from "./inbox.ts";
 import { LockBusyError, TICK_LOCK_WAIT_MS, waitingAtMost } from "./lock.ts";
 import { clearExitKnown, isExitKnown, markExitKnown, writeResult } from "./outbox.ts";
 import {
+	actsAsParent,
+	awaitsLaunchTurn,
 	effectiveRunState,
+	forOneRun,
 	getAgentDir,
 	inStartingGrace,
 	isLive,
@@ -12,9 +16,11 @@ import {
 	nextDeadline,
 	ownStartTime,
 	prepareLaunch,
+	processStartTime,
 	readMetadata,
 	removeRunDir,
 	resumeArgs,
+	savedLaunchId,
 	runDisplayName,
 	type RunMetadata,
 	skippingBusyRun,
@@ -200,9 +206,11 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	// No queued run: no liveness check, so the tick costs only the listing.
 	const sessionId = runs.find((run) => run.state === "queued")?.parentSessionId;
 	if (sessionId === undefined) return runs;
+	// Before the lock, as the check can start `ps`.
+	const mine = new Set(runs.filter((run) => run.state === "queued" && actsAsParent(run, { startTime: ownerStartTime })).map((run) => run.handle));
 	let result: { runs: RunMetadata[]; claimed: Extract<Claim, { claimed: true }>[] };
 	try {
-		result = countedUnderLock(sessionId, runs, (sessionExists) => claimQueuedRuns(listRuns(sessionId), sessionExists));
+		result = countedUnderLock(sessionId, runs, (sessionExists) => claimQueuedRuns(listRuns(sessionId), sessionExists, mine));
 	} catch (error) {
 		// The session lock is held, by a stalled process: nothing changed, the next tick tries again.
 		if (error instanceof LockBusyError) return runs;
@@ -227,23 +235,40 @@ export function startQueuedRuns(runs: RunMetadata[], onError: (run: RunMetadata,
 	return result.runs;
 }
 
-/** Under the session lock: claim the queued ones of `runs` while a slot is free. Starts no program. */
-function claimQueuedRuns(runs: RunMetadata[], sessionExists: (session: string) => boolean) {
+const OWNER_START_TTL_MS = 60 * 1000;
+
+/**
+ * Start times of other Pi this Pi has read, each kept a minute: an observer's tick starts no `ps` each
+ * second for the live owner it waits on, and still sees within a minute that a new process took its ID.
+ */
+const ownerStarts = new Map<number, { started: string | undefined; readAt: number }>();
+
+function ownerStartTime(pid: number): string | undefined {
+	const known = ownerStarts.get(pid);
+	if (known && Date.now() - known.readAt < OWNER_START_TTL_MS) return known.started;
+	const started = processStartTime(pid);
+	ownerStarts.set(pid, { started, readAt: Date.now() });
+	return started;
+}
+
+/**
+ * Under the session lock: claim the queued ones of `runs` in `mine` while a slot is free. Starts no program.
+ *
+ * `mine` are the handles this Pi owns, or whose owner is gone. Another live Pi of the session (`pi --session`
+ * in a second terminal) starts its own queued runs, gets their results, and suspends them when it quits. A
+ * run that appears after the check is not in `mine`: a later tick checks it.
+ */
+function claimQueuedRuns(runs: RunMetadata[], sessionExists: (session: string) => boolean, mine: ReadonlySet<string>) {
 	let free = runLimit() - liveRunCount(runs, sessionExists);
 	const claimed: Extract<Claim, { claimed: true }>[] = [];
 	const after = runs.flatMap((run) => {
-		if (free <= 0 || run.state !== "queued") return [run];
+		if (free <= 0 || run.state !== "queued" || !mine.has(run.handle)) return [run];
 		// Its `spawn` or `resume` has not saved the launch yet: tmux would start nothing. A later tick starts it.
 		if (!existsSync(join(run.runDir, "launch.json"))) return [run];
-		let claim: Claim;
-		try {
-			// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep.
-			claim = claimRun(run, { parentPid: process.pid, parentStarted: ownStartTime() });
-		} catch (error) {
-			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
-			if (error instanceof LockBusyError) return [run];
-			throw error;
-		}
+		// A run can wait past the Pi that spawned it: this Pi starts it, so it is the parent for the orphan sweep and gets its result.
+		// Its lock held by a stalled process, or an error: nothing changed, the next tick tries again.
+		const claim = forOneRun(run, () => claimRun(run, { parentPid: process.pid, parentStarted: ownStartTime() }), undefined);
+		if (!claim) return [run];
 		// `stop` removed the run since the listing.
 		if (!claim.run) return [];
 		if (!claim.claimed) return [claim.run];
@@ -265,7 +290,8 @@ const RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
 export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting", patch: Partial<RunMetadata> = {}): RunMetadata | undefined {
 	// A child that never started still has the launch `spawn` saved, with its first prompt. A started one gets
 	// the work its suspend cut. The launch first: from the `queued` write on, a parent tick can start the run.
-	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run, resumeArgs(run));
+	// Then the messages Pi held in memory when the quit came.
+	if (!existsSync(join(run.runDir, "launch.json"))) prepareLaunch(run, [...resumeArgs(run), ...unsavedMessages(run.runDir, run.sessionFile)]);
 	let claimed = false;
 	const next = updateMetadata(run.runDir, (current) => {
 		// Claimed: `queued`, or `starting` with no process yet. Past the grace time, its claimer died before the launch.
@@ -275,6 +301,8 @@ export function claimSuspendedRun(run: RunMetadata, state: "queued" | "starting"
 		return {
 			...patch,
 			state,
+			// A child of the launch before, killed by the quit, runs on for seconds: it must not write this run.
+			launchId: savedLaunchId(run.runDir),
 			error: undefined,
 			// The old process is gone; until the new one records its ID, the grace time tells whether it runs.
 			childPid: null,
@@ -326,32 +354,28 @@ export function resumeSuspendedRuns(sessionId: string, onError: (run: RunMetadat
  * candidates; the decision is made again on the run as it is under its lock.
  */
 export function stopTimedOutRuns(runs: RunMetadata[]): void {
-	for (const listed of runs) {
-		if (!isPastLimit(listed)) continue;
-		// Its process ended: nothing to stop. One with no process ID yet can still run in tmux.
-		if (listed.childPid !== null && effectiveRunState(listed) === "exited") continue;
-		// Already reported (`exited`, `failed to start`): it is ended with no second message.
-		const reported = isExitKnown(listed.runDir);
-		let stopped = false;
-		let run: RunMetadata | undefined;
-		try {
-			run = updateMetadata(listed.runDir, (current) => {
-				stopped = isPastLimit(current);
-				return stopped ? { timedOut: true } : undefined;
-			});
-		} catch (error) {
-			// Its lock is held, by a stalled process: nothing changed, the next tick tries again.
-			if (error instanceof LockBusyError) continue;
-			throw error;
-		}
-		if (!run || !stopped) continue;
-		// Before the kill, so the aborted turn and the ended process are not reported as well.
-		markExitKnown(run.runDir);
-		// In a child process, as the tick runs on Pi's UI thread. The result is written now: `wait` prints and
-		// clears it at once, and a result written after that would reach the parent a second time.
-		track(new Promise((resolveKill) => execFile("tmux", ["kill-session", "-t", run.tmuxSession], () => resolveKill())));
-		if (!reported) writeResult(run, "timed out", timedOutText(run));
-	}
+	for (const listed of runs) forOneRun(listed, () => stopIfTimedOut(listed), undefined);
+}
+
+function stopIfTimedOut(listed: RunMetadata): void {
+	if (!isPastLimit(listed)) return;
+	// Its process ended: nothing to stop. One with no process ID yet can still run in tmux.
+	if (listed.childPid !== null && effectiveRunState(listed) === "exited") return;
+	// Already reported (`exited`, `failed to start`): it is ended with no second message.
+	const reported = isExitKnown(listed.runDir);
+	let stopped = false;
+	// Its lock held by a stalled process: `forOneRun` skips it, and the next tick tries again.
+	const run = updateMetadata(listed.runDir, (current) => {
+		stopped = isPastLimit(current);
+		return stopped ? { timedOut: true } : undefined;
+	});
+	if (!run || !stopped) return;
+	// Before the kill, so the aborted turn and the ended process are not reported as well.
+	markExitKnown(run.runDir);
+	// In a child process, as the tick runs on Pi's UI thread. The result is written now: `wait` prints and
+	// clears it at once, and a result written after that would reach the parent a second time.
+	track(new Promise((resolveKill) => execFile("tmux", ["kill-session", "-t", run.tmuxSession], () => resolveKill())));
+	if (!reported) writeResult(run, "timed out", timedOutText(run));
 }
 
 /** Has not answered yet (`starting`, `busy`, or `idle` before its first turn) past its deadline, and not yet stopped or suspended. */
@@ -361,7 +385,7 @@ function isPastLimit(run: RunMetadata): boolean {
 }
 
 function hasNotAnswered(run: RunMetadata): boolean {
-	return run.state === "starting" || run.state === "busy" || (run.state === "idle" && !run.hasStarted);
+	return run.state === "starting" || run.state === "busy" || (run.state === "idle" && awaitsLaunchTurn(run));
 }
 
 /**
