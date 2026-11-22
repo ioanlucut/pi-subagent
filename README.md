@@ -229,7 +229,24 @@ This is a fork of [badlogic/pi-subagent](https://github.com/badlogic/pi-subagent
 <details>
 <summary><b>What this fork adds, and the two upstream bugs it fixes</b></summary>
 
-Added here: the model tool and skill, result messages, the rows and Herdr panes, the queue, time limits and start checks, agent files, light children, the always-on guard, worktrees, the fast parent, resume that finishes cut work, and the locks.
+| | Upstream | This fork |
+| --- | :---: | :---: |
+| Full Pi child in its own tmux session | ✅ | ✅ |
+| CLI: `spawn`, `list`, `status`, `rename`, `wait`, `send`, `stop` | ✅ | ✅ |
+| Pause and resume children with the parent session | ✅ | ✅ |
+| `subagent` model tool and a skill that teaches it | – | ✅ |
+| Answers arrive as chat messages, kept on disk until delivered | – | ✅ |
+| One live row per child; Herdr panes | – | ✅ |
+| Queue with a limit per session | – | ✅ |
+| Time limits; failed starts reported in about 15 s | – | ✅ |
+| Agent files (roles), safe against cloned repositories | – | ✅ |
+| Light children that keep their provider | – | ✅ |
+| Command guard in every child, off only with your consent | – | ✅ |
+| `--worktree` per child, existing branches too | – | ✅ |
+| Parent checks children without starting a program | – | ✅ |
+| Resume finishes cut work; queued messages survive a quit | – | ✅ |
+| Locks: parallel calls and two Pi on one session stay correct | – | ✅ |
+| `resume`, `last`, `interrupt`, `agents` commands | – | ✅ |
 
 | Issue | Upstream behaviour | Here |
 | --- | --- | --- |
