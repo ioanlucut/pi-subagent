@@ -12,7 +12,7 @@
 ![node](https://img.shields.io/badge/node-%E2%89%A522.19-339933?logo=node.js&logoColor=white)
 ![tmux](https://img.shields.io/badge/needs-tmux-1BB91F?logo=tmux&logoColor=white)
 
-**[Quick start](#-quick-start)** · **[Features](#-features)** · **[How it works](#-how-it-works)** · **[Reference](#-reference)** · **[Help](#-help-and-known-limits)**
+**[Quick start](#-quick-start)** · **[Features](#-features)** · **[How it works](#-how-it-works)** · **[Reference](#-reference)** · **[Trust limits](#-trust-limits)** · **[Help](#-help-and-known-limits)**
 
 </div>
 
@@ -219,8 +219,23 @@ Full table: [Lifecycle](#lifecycle).
 | --- | --- |
 | **Tests** | 222 unit and integration tests, `npm run verify:spec` (one check per spec ticket), and `npm run verify:e2e` (real Pi processes with a fake model, no login); CI runs `npm test` and `verify:e2e` on each pull request |
 | **Reviews** | Seven independent review rounds on four models (Opus, Fable, Astra, Sol), plus a real-model run; every finding was reproduced with a probe before it was fixed |
-| **Security** | Agent files from a cloned repository, model-written tool arguments, and the command guard are treated as trust boundaries; each fix has a regression test |
+| **Security** | Agent files from a cloned repository, model-written tool arguments, and the command guard are treated as trust boundaries; each fix has a regression test. A sandboxed security audit (30 agents, no network) found no remote or cross-user attack; its 8 local findings are listed in [Trust limits](#-trust-limits) |
 | **History** | [Spec #14](https://github.com/ioanlucut/pi-subagent/issues/14), 46 tickets, merged in [#25](https://github.com/ioanlucut/pi-subagent/pull/25), [#51](https://github.com/ioanlucut/pi-subagent/pull/51), [#53](https://github.com/ioanlucut/pi-subagent/pull/53), [#59](https://github.com/ioanlucut/pi-subagent/pull/59), [#60](https://github.com/ioanlucut/pi-subagent/pull/60), [#67](https://github.com/ioanlucut/pi-subagent/pull/67) |
+
+<details>
+<summary><b>How it got here</b></summary>
+
+| Step | What happened |
+| --- | --- |
+| 1. The problem | The old fork ran `tmux has-session` on Pi's UI thread every second for each child, so Pi felt slow |
+| 2. Spec | [#14](https://github.com/ioanlucut/pi-subagent/issues/14) set the goal: a fast parent, a model tool, a queue, roles, worktrees, light children |
+| 3. Build | Tickets #15–#24 and #26, then verification rounds #27–#44, merged in [#25](https://github.com/ioanlucut/pi-subagent/pull/25) |
+| 4. Review rounds | Fresh reviewers on other models found bugs; each was reproduced with a probe, then fixed: [#51](https://github.com/ioanlucut/pi-subagent/pull/51), [#53](https://github.com/ioanlucut/pi-subagent/pull/53), [#59](https://github.com/ioanlucut/pi-subagent/pull/59), [#67](https://github.com/ioanlucut/pi-subagent/pull/67) |
+| 5. Docs | A guide ([#60](https://github.com/ioanlucut/pi-subagent/pull/60)) and this front page ([#68](https://github.com/ioanlucut/pi-subagent/pull/68)) |
+| 6. Security audit | Recon, two hunting waves, two coverage critics, and an independent verifier for each candidate; code ran only in a locked container. Result: [Trust limits](#-trust-limits) |
+| Open | Rare timing edge cases in [#36](https://github.com/ioanlucut/pi-subagent/issues/36) |
+
+</details>
 
 ## 🍴 Where this fork comes from
 
@@ -652,6 +667,22 @@ npm test
 ```
 
 Upstream has no license file.
+
+## 🧱 Trust limits
+
+> [!IMPORTANT]
+> A child runs as you, with your environment. The command guard is a safety net, not a sandbox: a model with `bash` can remove it.
+
+The security audit of `038c798` confirmed these limits. Fixes are planned; until then, work around them:
+
+| Limit | What to do now |
+| --- | --- |
+| A parent started without `bash` (`--exclude-tools`, `--tools`) can still spawn a child that has `bash` | Exclude the `subagent` tool too, or give every spawn `--tools` |
+| `--worktree` runs Git in the `--cwd` you give it, and Git runs that repository's hooks | Use `--worktree` only in repositories you trust |
+| A role file must use the flat form `tools: read,grep` and `mcp: false`; other forms are ignored with no warning | Write each key in lower case on one line, as in [Agent files](#agent-files) |
+| A project role with the same name replaces your global role | Use unique role names, or restate `--tools` and `--no-mcp` |
+| `PI_SUBAGENT_ALLOW_UNGUARDED=1` can reach later Pi processes in the same tmux server | Prefer the `subagentAllowUnguarded` setting |
+| Child text is shown in the parent with terminal control characters | Do not run untrusted children in a terminal you rely on for secrets |
 
 ## 🆘 Help and known limits
 
