@@ -11,6 +11,7 @@ import { piExtensions } from "./packages.ts";
 import { clearResults, isExitKnown, markExitKnown, markWaiting, returnResults, takeResults } from "./outbox.ts";
 import { resumeRun, settleTmuxCalls, startRun, stateLine, stopTimedOutRuns, timedOutText, writeNewRun } from "./queue.ts";
 import { reportStuckStarts } from "./start-check.ts";
+import { userAllowsUnguarded } from "./unguarded.ts";
 import {
 	assistantText,
 	awaitsLaunchTurn,
@@ -39,6 +40,8 @@ import {
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
 const GUARD = "cc-safety-net";
+/** Names no setting: the model reads this, and must not learn how to drop the guard. */
+const ONLY_USER = "Only the user can allow children without the guard, in Pi's settings";
 
 /**
  * The enabled extension files of the command guard, from Pi's packages or global extensions. Every child that does
@@ -48,11 +51,11 @@ const GUARD = "cc-safety-net";
 function guardExtension(): string[] {
 	const guard = piExtensions().filter((extension) => extension.enabled && basename(extension.owner).replace(/\.[jt]s$/, "") === GUARD).map((extension) => extension.path);
 	if (guard.length > 0) return guard;
-	if (process.env.PI_SUBAGENT_ALLOW_UNGUARDED !== "1")
+	if (!userAllowsUnguarded())
 		fail(
-			`The command guard ${GUARD} is not installed or is turned off in Pi's packages, so a light child would run without it. Install it with \`pi install npm:${GUARD}\`, drop --no-extensions or --extensions, or let the user set PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn.`,
+			`The command guard ${GUARD} is not installed or is turned off in Pi's packages, so a light child would run without it. Install it with \`pi install npm:${GUARD}\`, or drop --no-extensions or --extensions. ${ONLY_USER}.`,
 		);
-	process.stderr.write(`Warning: the command guard ${GUARD} is not installed or is turned off in Pi's packages; the child runs without it, as PI_SUBAGENT_ALLOW_UNGUARDED=1 allows\n`);
+	process.stderr.write(`Warning: the command guard ${GUARD} is not installed or is turned off in Pi's packages; the child runs without it, as the user allowed in Pi's settings\n`);
 	return [];
 }
 
@@ -61,9 +64,8 @@ function lightExtensionArgs(list: string): string[] {
 	const names = list.split(",").map((name) => name.trim()).filter(Boolean);
 	if (names.length === 0) fail("--extensions requires at least one extension");
 	const unguarded = names.includes(`-${GUARD}`);
-	// The model writes the tool's parameters, so it could drop the guard in one call; only the user sets the environment.
-	if (unguarded && process.env.PI_SUBAGENT_ALLOW_UNGUARDED !== "1")
-		fail(`-${GUARD} drops the command guard; only the user can allow it, with PI_SUBAGENT_ALLOW_UNGUARDED=1 in the environment of the Pi that runs spawn`);
+	// The model writes the tool's parameters and the command, so it could drop the guard in one call.
+	if (unguarded && !userAllowsUnguarded()) fail(`-${GUARD} drops the command guard; ${ONLY_USER.replace(/^O/, "o")}`);
 	const guard = unguarded ? [] : guardExtension();
 	const listed = names.filter((name) => name !== `-${GUARD}`).map((name) => (/^[a-z]+:/.test(name) ? name : resolve(name)));
 	return ["--no-extensions", ...[extensionPath, ...guard, ...listed].flatMap((path) => ["--extension", path])];
@@ -309,7 +311,7 @@ async function spawnSubagent(callerArgs: string[]): Promise<void> {
 				break;
 			case "--timeout":
 				timeout = valueAfter(args, i, arg);
-				if (parseDuration(timeout) === undefined) fail("--timeout must be a duration such as 90s, 10m, or 1h");
+				if (parseDuration(timeout) === undefined) fail("--timeout must be a duration such as 90s, 10m, or 1h, of at most 7 days");
 				i++;
 				break;
 			case "--prompt":
@@ -395,7 +397,7 @@ async function spawnSubagent(callerArgs: string[]): Promise<void> {
 	let queued = false;
 	try {
 		// The launch first: from the metadata write on, a parent tick can start a queued run.
-		prepareLaunch(metadata, initialArgs);
+		metadata.launchId = prepareLaunch(metadata, initialArgs);
 		saveFirstPrompt(runDir, initialArgs);
 		queued = writeNewRun(metadata);
 		metadata.state = queued ? "queued" : "starting";

@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	constants,
@@ -66,7 +66,7 @@ export interface RunMetadata {
 	cutWork?: "first-prompt" | "continue";
 	/** When the child's session started, written by the child: a first prompt that Pi has not accepted 15 s later failed. */
 	sessionStartedAt?: string;
-	/** Set by the child when Pi accepted its first prompt (`before_agent_start`): extensions may still hold the turn's start. */
+	/** Set by the child when Pi accepted the prompt of its launch (Pi busy, or `before_agent_start`): extensions may still hold the turn's start. */
 	promptAccepted?: boolean;
 	/** Written by the child when its Pi asks whether to trust `cwd`, before its session starts; cleared when it starts. */
 	waitsForTrust?: { cwd: string; since: string };
@@ -74,6 +74,8 @@ export interface RunMetadata {
 	trustReported?: boolean;
 	/** Set by the parent when it stops a child whose first prompt never became a turn. */
 	failedToStart?: boolean;
+	/** The launch the child must have to write the run: a child that a quit killed runs on for seconds after a resume launched the next. */
+	launchId?: string;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -108,14 +110,18 @@ interface AssistantEntry extends SessionEntry {
 
 const DURATION_UNITS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000 };
 
-/** Milliseconds in a duration such as `90s`, `10m`, or `1h`; undefined when it is not one. */
+/** The longest time limit: a much longer one is no limit, and past about 270,000 years it is no date. */
+const MAX_DURATION_MS = 7 * 24 * 3_600_000;
+
+/** Milliseconds in a duration such as `90s`, `10m`, or `1h`; undefined when it is not one, or is longer than 7 days. */
 export function parseDuration(value: string): number | undefined {
 	const match = /^([1-9]\d*)([smh])$/.exec(value);
-	return match ? Number(match[1]) * DURATION_UNITS[match[2]] : undefined;
+	const ms = match ? Number(match[1]) * DURATION_UNITS[match[2]] : undefined;
+	return ms !== undefined && ms <= MAX_DURATION_MS ? ms : undefined;
 }
 
 /** Survives `/reload`, which loads this module again in the same process. */
-const processState = globalThis as { piSubagentRunDir?: string; piSubagentAliveFd?: number; piSubagentOwnStarted?: string };
+const processState = globalThis as { piSubagentRunDir?: string; piSubagentLaunchId?: string; piSubagentAliveFd?: number; piSubagentOwnStarted?: string };
 
 /**
  * The run this process is the child of. The child takes PI_SUBAGENT_RUN_DIR out of its environment, so a
@@ -127,10 +133,17 @@ export function claimRunDir(): string | undefined {
 	const inherited = process.env.PI_SUBAGENT_RUN_DIR;
 	if (inherited) {
 		processState.piSubagentRunDir = inherited;
+		processState.piSubagentLaunchId = process.env.PI_SUBAGENT_LAUNCH_ID || undefined;
 		delete process.env.PI_SUBAGENT_RUN_DIR;
+		delete process.env.PI_SUBAGENT_LAUNCH_ID;
 		process.env.PI_SUBAGENT_NESTED = "1";
 	}
 	return processState.piSubagentRunDir;
+}
+
+/** The launch of the run this process is the child of, which `claimRunDir` took from the environment. */
+export function ownLaunchId(): string | undefined {
+	return processState.piSubagentLaunchId;
 }
 
 /**
@@ -148,6 +161,26 @@ export function guarded(name: string, callback: () => void): () => void {
 			console.error(`pi-subagent: ${name} failed, retrying each tick: ${error instanceof Error ? error.stack : String(error)}`);
 		}
 	};
+}
+
+/** Runs whose error `forOneRun` logged, so each is logged once. */
+const loggedRunErrors = new Set<string>();
+
+/**
+ * Run `fn`, the work of a tick's loop on one run, and return `skipped` when it throws: a run whose directory
+ * cannot be written, or whose metadata no date fits, must not stop the queue and the results of the others.
+ * The error is logged once for each run; a lock held by a stalled process is no error, the next tick tries again.
+ */
+export function forOneRun<T>(run: RunMetadata, fn: () => T, skipped: T): T {
+	try {
+		return fn();
+	} catch (error) {
+		if (!(error instanceof LockBusyError) && !loggedRunErrors.has(run.runDir)) {
+			loggedRunErrors.add(run.runDir);
+			console.error(`pi-subagent: run ${run.handle} skipped, retrying each tick: ${error instanceof Error ? error.stack : String(error)}`);
+		}
+		return skipped;
+	}
 }
 
 export function getAgentDir(): string {
@@ -346,12 +379,13 @@ function writeLaunchFile(runDir: string, env: NodeJS.ProcessEnv, command: string
  * They go after `--`: Pi reads a positional that starts with `-` as an option, so an agent body
  * `--approve` would make the child trust a cloned repository and run its extensions.
  */
-export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): void {
+export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = []): string {
 	// A file in the working directory must not choose the program: a cloned repository could.
 	const launcher = process.env.PI_SUBAGENT_PI || "pi";
+	const launchId = randomUUID();
 	writeLaunchFile(
 		metadata.runDir,
-		{ ...process.env, PWD: metadata.cwd, PI_SUBAGENT_RUN_DIR: metadata.runDir },
+		{ ...process.env, PWD: metadata.cwd, PI_SUBAGENT_RUN_DIR: metadata.runDir, PI_SUBAGENT_LAUNCH_ID: launchId },
 		[
 			launcher,
 			"--session",
@@ -367,6 +401,16 @@ export function prepareLaunch(metadata: RunMetadata, initialArgs: string[] = [])
 			...initialArgs,
 		],
 	);
+	return launchId;
+}
+
+/** The launch ID in the run's saved launch, which its next child gets; undefined when none is saved. */
+export function savedLaunchId(runDir: string): string | undefined {
+	try {
+		return (JSON.parse(readFileSync(join(runDir, "launch.json"), "utf8")) as { env: NodeJS.ProcessEnv }).env.PI_SUBAGENT_LAUNCH_ID;
+	} catch {
+		return undefined;
+	}
 }
 
 const firstPromptPath = (runDir: string): string => join(runDir, "first-prompt.json");
@@ -446,7 +490,9 @@ function newSessionArgs(metadata: RunMetadata): string[] {
 		"-y",
 		"40",
 		"-c",
-		metadata.cwd,
+		// tmux expands `-c` as a format: `C#` or `#{…}` would start the child in `$HOME`. It halves a run of `#`,
+		// except one before `[` (a style), which it keeps as is: so only the other runs are doubled.
+		metadata.cwd.replace(/#+(?![#[])/g, (run) => run + run),
 		"--",
 		// Start the launcher with only tmux's pane variables: server values such as NODE_OPTIONS could break node.
 		"/bin/sh",
